@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+langgraph
+langchain-core
+langchain-community
+openai
+tiktoken
+sentence-transformers
+spacy
+pydantic
+requests
+streamlit
