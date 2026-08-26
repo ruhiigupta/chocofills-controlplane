@@ -1,16 +1,133 @@
 # Enterprise AI Security Policy
 
 ## 1. Data Classification
-* **Public**: Marketing materials, public documentation, press releases. Allowed to be processed by any external LLM.
-* **Internal**: Employee handbooks, internal memos. Allowed to be processed by approved external LLMs (e.g., Enterprise Gemini) but must not be used for model training.
-* **Confidential**: Financial reports, unreleased product roadmaps. Allowed only on internal, self-hosted LLMs. Strictly forbidden from leaving the trust boundary.
-* **Highly Restricted**: Customer PII (Social Security Numbers, Credit Cards), API Keys, Passwords, Health Records (PHI). Strictly forbidden from being processed by any LLM. 
+
+### Public
+Examples:
+- Marketing materials
+- Public documentation
+- Published press releases
+- Public website content
+
+Policy:
+- May be processed by internal or external LLMs.
+- No special restriction is required unless the content contains another protected data type.
+
+### Internal
+Examples:
+- Employee handbooks
+- Internal memos
+- Internal operational information
+- Non-public business information
+
+Policy:
+- May be processed by approved external enterprise LLMs.
+- Must not be used for model training.
+- If Internal data contains PII and is sent to an external LLM, the PII must be redacted before transmission.
+- Internal data without protected PII may be transmitted to an approved external LLM.
+
+### Confidential
+Examples:
+- Financial reports
+- Unreleased product roadmaps
+- Proprietary business strategy
+- Non-public source code containing proprietary algorithms
+
+Policy:
+- May only be processed by approved internal/self-hosted LLMs.
+- Must never cross the organizational trust boundary.
+- External LLM processing is prohibited.
+
+### Highly Restricted
+Examples:
+- Social Security Numbers
+- Credit card numbers
+- API keys
+- Passwords
+- Authentication tokens
+- Protected health information (PHI)
+
+Policy:
+- Must never be processed by an LLM.
+- Must never be transmitted to an external system.
+- Detection of secrets or highly restricted credentials must result in BLOCK.
+
+---
 
 ## 2. Information Flow Policies
-* Data classified as Confidential or Highly Restricted must never cross the trust boundary to an external system (e.g., `dest: external_systems`).
-* Internal applications querying external LLMs must undergo automated PII redaction before transmission.
 
-## 3. Code and Infrastructure
-* Source code containing proprietary algorithms must not be pasted into public external LLMs.
-* Infrastructure configurations (Terraform, AWS cloudformation) must be scanned for hardcoded secrets (API keys, AWS secret access keys) before LLM analysis. If secrets are found, the request must be BLOCKED immediately.
+### Public Data
+Public data may flow to approved external systems.
 
+### Internal Data
+Internal data may flow to approved external LLMs.
+
+If Internal data contains PII:
+- PII must be redacted before transmission to an external LLM.
+- If redaction is unavailable, require human approval or block according to the configured enforcement policy.
+
+### Confidential Data
+Confidential data must never cross the trust boundary to an external system.
+
+### Highly Restricted Data
+Highly Restricted data must never be transmitted to an external system or processed by an LLM.
+
+---
+
+## 3. Personally Identifiable Information
+
+The following are treated as PII:
+- Email addresses
+- Phone numbers
+- Names when combined with identifying information
+- Government identification numbers
+- Customer identifiers
+- Addresses
+- Other organization-defined personal identifiers
+
+For Internal data:
+- PII sent to an external LLM requires redaction before transmission.
+- If automated redaction is unavailable, the request must not be silently allowed.
+
+For Confidential or Highly Restricted data:
+- External transmission is prohibited regardless of redaction.
+
+---
+
+## 4. Code and Infrastructure
+
+Source code containing proprietary algorithms:
+- Must not be sent to public external LLMs.
+- May only be processed by approved internal or enterprise environments.
+
+Infrastructure configuration files including:
+- Terraform
+- AWS CloudFormation
+- Kubernetes configuration
+- Environment configuration files
+
+must be scanned for secrets before LLM processing.
+
+If API keys, passwords, authentication tokens, AWS secret keys, or equivalent credentials are detected:
+- BLOCK immediately.
+
+---
+
+## 5. Policy Precedence
+
+When multiple policies apply, the most restrictive applicable decision takes precedence:
+
+BLOCK
+>
+REQUIRE_APPROVAL
+>
+REDACT
+>
+FLAG
+>
+ALLOW
+
+An LLM fallback must never override a deterministic BLOCK, REDACT, or REQUIRE_APPROVAL decision.
+
+If no applicable policy can be established with sufficient confidence:
+- FLAG for human review.

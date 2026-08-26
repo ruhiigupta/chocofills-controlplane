@@ -13,7 +13,9 @@ def security_agent_node(state: ControlPlaneState) -> dict:
     # Run the real evaluation using the regex patterns + LLM context
     results = security_agent_instance.scan_output(
         llm_response=llm_response,
-        user_prompt=user_prompt
+        user_prompt=user_prompt,
+        source=state.get("source", "internal_api"),
+        dest=state.get("destination", "external_vendor"),
     )
     
     print(f"[LangGraph Node - Security] Score: {results['security_score']} | Status: {results['security_status']}")
@@ -24,7 +26,8 @@ def security_agent_node(state: ControlPlaneState) -> dict:
         "security_status": results["security_status"],
         "security_decision": results["security_decision"],
         "security_findings": results["security_findings"],
-        "matched_policies": results["matched_policies"]
+        "matched_policies": results["matched_policies"],
+        "policy_source": results["policy_source"]
     }
 
 def performance_agent_node(state: ControlPlaneState) -> dict:
@@ -53,34 +56,22 @@ def decision_layer_node(state: ControlPlaneState) -> dict:
     # Weighting: Security 40%, Performance 40%, Cost 20%
     unified_risk = (0.4 * sec) + (0.4 * perf) + (0.2 * cost)
     
-    # Configurable Policy Layer based on Use Case (Risk Appetite)
     use_case = state.get("use_case", "internal_copilot")
-    
-    # Default tolerances (Medium Risk)
-    block_threshold = 70
-    flag_threshold = 40
-    
-    if use_case == "customer_support":
-        # Low risk tolerance for external facing
-        block_threshold = 50
-        flag_threshold = 25
-    elif use_case == "regulated_decision_support":
-        # Zero risk tolerance for regulated environments
-        block_threshold = 30
-        flag_threshold = 15
 
-    # Policy Decision Engine
+    # Policy decisions are authoritative; the score remains an observability metric.
     security_decision = state.get("security_decision", "UNKNOWN")
-    if security_decision == "BLOCK" or sec >= 80 or unified_risk >= block_threshold:
+    if security_decision == "BLOCK":
         final_action = "BLOCK"
     elif security_decision == "REDACT":
         final_action = "REDACT"
-    elif security_decision == "REQUIRE_APPROVAL" or state.get("security_status") == "FLAG":
+    elif security_decision == "REQUIRE_APPROVAL":
         final_action = "REQUIRE_APPROVAL"
-    elif unified_risk >= flag_threshold:
+    elif security_decision == "FLAG":
         final_action = "FLAG"
-    else:
+    elif security_decision == "ALLOW":
         final_action = "ALLOW"
+    else:
+        final_action = "FLAG"
         
     print(f"[LangGraph Decision] Use Case: {use_case} | Action: {final_action} | Unified Risk: {unified_risk}")
     

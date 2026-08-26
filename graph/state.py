@@ -4,6 +4,8 @@ class ControlPlaneState(TypedDict):
     # Input & LLM Metadata
     user_id: str
     use_case: str
+    source: str
+    destination: str
     user_prompt: str
     system_prompt: Optional[str]
     source_documents: List[Dict[str, str]]
@@ -25,6 +27,7 @@ class ControlPlaneState(TypedDict):
     security_decision: str
     security_findings: List[Dict[str, Any]]
     matched_policies: List[Dict[str, Any]]
+    policy_source: str
     
     # Cost Agent Outputs
     cost_score: float

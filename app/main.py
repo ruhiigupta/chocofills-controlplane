@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import our LangGraph State & Workflow
-from graph.workflow import controlplane_graph
+from graph.workflow import controlplane_graph, security_agent_instance
 from graph.state import ControlPlaneState
 
 app = FastAPI(title="ControlPlane.ai Gateway")
@@ -86,6 +86,7 @@ async def chat_endpoint(
     file: Optional[UploadFile] = File(None)
 ):
     final_input_text = ""
+    destination = "external_vendor"
 
     if file:
         file_bytes = await file.read()
@@ -107,6 +108,43 @@ async def chat_endpoint(
             "reason": "Prompt Injection / Malicious Payload Detected",
             "preflight_risk_score": risk_score,
             "cost_incurred": "$0.00"
+        }
+
+    preflight_patterns = security_agent_instance.pattern_scanner(final_input_text)
+    preflight_sensitivity = security_agent_instance._deterministic_sensitivity(
+        final_input_text,
+        preflight_patterns["matches"],
+    )
+
+    if preflight_sensitivity == "Highly Restricted":
+        return {
+            "status": "BLOCKED",
+            "reason": "Highly Restricted data detected before target LLM processing.",
+            "preflight_risk_score": 100.0,
+            "governance": {
+                "security_status": "FAIL",
+                "security_decision": "BLOCK",
+                "policy_source": "DETERMINISTIC",
+                "security_findings": preflight_patterns["findings"],
+                "estimated_cost": 0.0,
+            },
+        }
+
+    if (
+        preflight_sensitivity == "Confidential"
+        and destination == "external_vendor"
+    ):
+        return {
+            "status": "BLOCKED",
+            "reason": "Confidential data cannot be sent to an external LLM.",
+            "preflight_risk_score": 100.0,
+            "governance": {
+                "security_status": "FAIL",
+                "security_decision": "BLOCK",
+                "policy_source": "DETERMINISTIC",
+                "security_findings": preflight_patterns["findings"],
+                "estimated_cost": 0.0,
+            },
         }
     
     # Target LLM Execution 
@@ -130,6 +168,8 @@ async def chat_endpoint(
     initial_state: ControlPlaneState = {
         "user_id": user_id,
         "use_case": use_case,
+        "source": "internal_api",
+        "destination": "external_vendor",
         "user_prompt": final_input_text.strip(),
         "system_prompt": None,
         "source_documents": [],
@@ -145,6 +185,7 @@ async def chat_endpoint(
         "security_decision": "PENDING",
         "security_findings": [],
         "matched_policies": [],
+        "policy_source": "PENDING",
         "cost_score": 0.0,
         "cost_status": "PENDING",
         "input_tokens": len(final_input_text.split()),
@@ -168,6 +209,7 @@ async def chat_endpoint(
             "security_decision": final_state["security_decision"],
             "security_findings": final_state["security_findings"],
             "matched_policies": final_state["matched_policies"],
+            "policy_source": final_state["policy_source"],
             "performance_status": final_state["performance_status"],
             "cost_status": final_state["cost_status"],
             "estimated_cost": final_state["estimated_cost"]
