@@ -3,6 +3,9 @@ from typing import Optional
 import uvicorn
 import pymupdf  
 from llm_guard.input_scanners import PromptInjection
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Import our LangGraph State & Workflow
 from graph.workflow import controlplane_graph
@@ -39,13 +42,46 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
             raise HTTPException(status_code=500, detail="OCR processing failed.")
     return extracted_text
 
-def call_target_llm(prompt: str) -> str:
-    """Simulated call to the target enterprise model."""
-    return "This is a simulated response from Gemini containing employee account details: email=john.doe@enterprise.com."
+from google import genai
+import os
+import time
+
+def call_target_llm(prompt: str) -> tuple[str, bool]:
+    """Real call to the target enterprise Gemini model."""
+    api_key = os.getenv("GEMINI_API_KEY", "dummy_key_if_none")
+    if api_key == "dummy_key_if_none":
+        print("[Warning] GEMINI_API_KEY not set, using simulated response.")
+        return (
+            "This is a simulated response from Gemini containing employee account details: "
+            "email=john.doe@enterprise.com.",
+            False,
+        )
+
+    model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    last_error = ""
+
+    for attempt in range(3):
+        try:
+            client = genai.Client(api_key=api_key)
+            response = client.models.generate_content(model=model, contents=prompt)
+            return response.text, False
+        except Exception as e:
+            last_error = str(e)
+            transient = any(
+                marker in last_error.lower()
+                for marker in ("429", "500", "502", "503", "504", "unavailable", "resource exhausted")
+            )
+            if not transient or attempt == 2:
+                break
+            time.sleep(2 ** attempt)
+
+    print(f"[LLM Error] {last_error}")
+    return f"Error communicating with Gemini: {last_error}", True
 
 @app.post("/chat")
 async def chat_endpoint(
     user_id: str = Form(...),
+    use_case: str = Form("internal_copilot"),
     prompt: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None)
 ):
@@ -74,14 +110,31 @@ async def chat_endpoint(
         }
     
     # Target LLM Execution 
-    llm_response = call_target_llm(final_input_text)
+    llm_response, llm_failed = call_target_llm(final_input_text)
+
+    if llm_failed:
+        return {
+            "status": "FAIL",
+            "processed_input": final_input_text.strip(),
+            "llm_response": llm_response,
+            "governance": {
+                "unified_risk_score": 100.0,
+                "security_status": "FAIL",
+                "performance_status": "NOT_RUN",
+                "cost_status": "NOT_RUN",
+                "estimated_cost": 0.0,
+            },
+        }
     
     # LangGraph Orchestration
     initial_state: ControlPlaneState = {
         "user_id": user_id,
+        "use_case": use_case,
         "user_prompt": final_input_text.strip(),
+        "system_prompt": None,
+        "source_documents": [],
         "llm_response": llm_response,
-        "model_name": "gemini-1.5-pro",
+        "model_name": os.getenv("GEMINI_MODEL", "gemini-3.6-flash"),
         "preflight_risk_score": risk_score,
         "performance_score": 0.0,
         "performance_status": "PENDING",
@@ -89,7 +142,9 @@ async def chat_endpoint(
         "relevance_findings": [],
         "security_score": 0.0,
         "security_status": "PENDING",
+        "security_decision": "PENDING",
         "security_findings": [],
+        "matched_policies": [],
         "cost_score": 0.0,
         "cost_status": "PENDING",
         "input_tokens": len(final_input_text.split()),
@@ -110,6 +165,9 @@ async def chat_endpoint(
         "governance": {
             "unified_risk_score": final_state["unified_risk_score"],
             "security_status": final_state["security_status"],
+            "security_decision": final_state["security_decision"],
+            "security_findings": final_state["security_findings"],
+            "matched_policies": final_state["matched_policies"],
             "performance_status": final_state["performance_status"],
             "cost_status": final_state["cost_status"],
             "estimated_cost": final_state["estimated_cost"]

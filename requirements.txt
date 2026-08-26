@@ -10,3 +10,5 @@ spacy
 pydantic
 requests
 streamlit
+faiss-cpu
+google-genai

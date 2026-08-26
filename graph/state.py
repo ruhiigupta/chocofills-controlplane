@@ -1,9 +1,12 @@
-from typing import TypedDict, List, Dict, Any
+from typing import TypedDict, List, Dict, Any, Optional
 
 class ControlPlaneState(TypedDict):
     # Input & LLM Metadata
     user_id: str
+    use_case: str
     user_prompt: str
+    system_prompt: Optional[str]
+    source_documents: List[Dict[str, str]]
     llm_response: str
     model_name: str
     
@@ -19,7 +22,9 @@ class ControlPlaneState(TypedDict):
     # Security Agent Outputs
     security_score: float
     security_status: str
+    security_decision: str
     security_findings: List[Dict[str, Any]]
+    matched_policies: List[Dict[str, Any]]
     
     # Cost Agent Outputs
     cost_score: float

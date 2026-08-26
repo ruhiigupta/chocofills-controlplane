@@ -1,0 +1,16 @@
+# Enterprise AI Security Policy
+
+## 1. Data Classification
+* **Public**: Marketing materials, public documentation, press releases. Allowed to be processed by any external LLM.
+* **Internal**: Employee handbooks, internal memos. Allowed to be processed by approved external LLMs (e.g., Enterprise Gemini) but must not be used for model training.
+* **Confidential**: Financial reports, unreleased product roadmaps. Allowed only on internal, self-hosted LLMs. Strictly forbidden from leaving the trust boundary.
+* **Highly Restricted**: Customer PII (Social Security Numbers, Credit Cards), API Keys, Passwords, Health Records (PHI). Strictly forbidden from being processed by any LLM. 
+
+## 2. Information Flow Policies
+* Data classified as Confidential or Highly Restricted must never cross the trust boundary to an external system (e.g., `dest: external_systems`).
+* Internal applications querying external LLMs must undergo automated PII redaction before transmission.
+
+## 3. Code and Infrastructure
+* Source code containing proprietary algorithms must not be pasted into public external LLMs.
+* Infrastructure configurations (Terraform, AWS cloudformation) must be scanned for hardcoded secrets (API keys, AWS secret access keys) before LLM analysis. If secrets are found, the request must be BLOCKED immediately.
+
