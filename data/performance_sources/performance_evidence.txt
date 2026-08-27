@@ -1,0 +1,5 @@
+The project uses FAISS for local vector retrieval.
+
+The performance evaluation workflow uses HuggingFace embeddings and a LangChain retriever to gather source-document evidence before factuality scoring.
+
+This evidence is retrieved from local documents and is only used for factual verification.

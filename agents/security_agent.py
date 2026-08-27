@@ -123,14 +123,119 @@ class SecurityAgent:
 
     def context_classifier(self, prompt: str, response: str) -> Dict[str, Any]:
         """Layer 2: LLM Context Classifier."""
-        sys_prompt = """You are an enterprise data sensitivity classifier.
-Classify only the information contained in the prompt and response.
-Use exactly one sensitivity: Public, Internal, Confidential, or Highly Restricted.
-Public means intentionally public information. Internal means non-public organizational information.
-Confidential includes financial reports, unreleased roadmaps, proprietary algorithms, and confidential source code.
-Highly Restricted includes API keys, passwords, authentication tokens, SSNs, credit cards, and PHI.
-A detected secret or regulated identifier must be Highly Restricted. Do not classify a person’s email or phone as Public merely because it is not a secret. When uncertain, choose the more restrictive classification.
-Return only valid JSON: {\"sensitivity\": \"Public|Internal|Confidential|Highly Restricted\", \"confidence\": 0.0, \"categories\": [], \"reason\": \"brief explanation\"}."""
+        sys_prompt = """You are an enterprise data sensitivity classification engine.
+
+    Your task is to classify the INFORMATION contained in the user's prompt and the LLM response.
+
+    IMPORTANT:
+    Classify the sensitivity of the actual information/data being transmitted, NOT the topic being discussed, the user's intent, or the fact that the request is related to security or an organization.
+
+    Use exactly one sensitivity level:
+    - Public
+    - Internal
+    - Confidential
+    - Highly Restricted
+
+    CLASSIFICATION RULES:
+
+    1. PUBLIC
+    Information that is intentionally public or generally available to anyone.
+    Examples:
+    - General knowledge
+    - Public educational information
+    - Public documentation
+    - Publicly available facts
+    - General questions such as "What is machine learning?"
+    - Questions about passwords, APIs, security, etc. when NO actual secret or sensitive data is provided
+
+    2. INTERNAL
+    Non-public organizational information that is not confidential or highly restricted.
+    Examples:
+    - Internal processes
+    - Internal procedures
+    - Internal project information
+    - Non-public operational information
+    - Internal discussions that do not contain confidential or highly restricted data
+
+    3. CONFIDENTIAL
+    Sensitive non-public organizational information whose disclosure could harm the organization.
+    Examples:
+    - Financial reports or non-public financial information
+    - Unreleased product plans or roadmaps
+    - Proprietary algorithms
+    - Confidential source code
+    - Non-public business strategy
+    - Confidential technical documentation
+
+    4. HIGHLY RESTRICTED
+    Information that must receive the highest level of protection.
+    Examples:
+    - Passwords
+    - API keys
+    - Authentication tokens
+    - Access tokens
+    - Bearer tokens
+    - Private keys
+    - Secrets or credentials
+    - SSNs / government identification numbers
+    - Credit/debit card numbers
+    - Protected health information (PHI)
+    - Other regulated or authentication-sensitive identifiers
+
+    CRITICAL DISTINCTIONS:
+
+    - A QUESTION ABOUT sensitive information is NOT itself sensitive.
+    Example: "What is an API key?" -> Public.
+
+    - A REQUEST TO DISCUSS password policies is NOT itself a password.
+    Example: "How should a company improve its password policy?" -> Public/Internal depending on context.
+
+    - ACTUAL sensitive data appearing in the prompt or response MUST be classified according to that data.
+    Example: "My password is P@ssw0rd123" -> Highly Restricted.
+
+    - The presence of words such as "password", "API key", "SSN", "security", or "confidential" does NOT automatically determine the classification. Determine whether actual sensitive information is present.
+
+    - Do not infer sensitive information that is not explicitly present.
+
+    - Do not downgrade information merely because it appears inside an otherwise harmless question.
+
+    - If multiple sensitivity levels are present, choose the HIGHEST applicable level.
+
+    - Evaluate both the USER PROMPT and LLM RESPONSE.
+
+    - If either contains sensitive information, classify according to the highest applicable sensitivity level across both fields.
+
+    - Do not let harmless content in one field downgrade sensitive content in the other.
+
+    - If actual secrets or regulated identifiers are detected, always classify as Highly Restricted.
+
+    - Email addresses and phone numbers are personal information and must NOT automatically be classified as Public merely because they are not secrets.
+
+    - When uncertain between two levels, choose the more restrictive level.
+
+    CONFIDENCE:
+    Return a confidence between 0.0 and 1.0 representing how certain you are about the classification.
+
+    CATEGORIES:
+    Return concise categories describing the sensitive information actually detected.
+    Examples:
+    ["Password"]
+    ["API Key"]
+    ["Financial Information"]
+    ["Source Code"]
+    ["General Knowledge"]
+    If no sensitive category is present, return [].
+
+    REASON:
+    Give a brief explanation based only on the information present in the prompt and response.
+
+    Return ONLY valid JSON in exactly this structure:
+    {
+        "sensitivity": "Public|Internal|Confidential|Highly Restricted",
+        "confidence": 0.0,
+        "categories": [],
+        "reason": "brief explanation"
+    }"""
         user_prompt = f"Prompt: {prompt}\nResponse: {response}\nClassify the sensitivity of the response context."
         
         llm_out = self._call_llm_json(sys_prompt, user_prompt)
@@ -152,12 +257,81 @@ Return only valid JSON: {\"sensitivity\": \"Public|Internal|Confidential|Highly 
             return "Highly Restricted"
 
         confidential_terms = (
+            # Explicit confidentiality
             "confidential",
-            "unreleased roadmap",
-            "financial report",
+            "strictly confidential",
+            "private",
+            "non-public",
+            "not for public distribution",
+            "internal use only",
+            "do not share",
+            "do not distribute",
+
+            # Business / strategy
             "proprietary business strategy",
+            "business strategy",
             "internal strategy",
+            "strategic plan",
+            "business plan",
+            "go-to-market strategy",
+            "competitive strategy",
+            "pricing strategy",
+            "sales strategy",
+            "marketing strategy",
+
+            # Product / roadmap
+            "unreleased roadmap",
+            "product roadmap",
+            "internal roadmap",
+            "unreleased product",
+            "unannounced product",
+            "product launch plan",
+            "launch plan",
+            "product strategy",
+
+            # Financial
+            "financial report",
+            "financial statement",
+            "financial forecast",
+            "revenue forecast",
+            "earnings forecast",
+            "budget",
+            "internal budget",
+            "profit margin",
+            "cost structure",
+            "pricing information",
+
+            # Intellectual property / technology
             "proprietary algorithm",
+            "proprietary technology",
+            "proprietary model",
+            "trade secret",
+            "internal source code",
+            "proprietary source code",
+            "internal architecture",
+            "system architecture",
+            "technical design",
+            "internal documentation",
+
+            # Corporate / operational
+            "internal policy",
+            "internal procedure",
+            "internal process",
+            "internal documentation",
+            "employee information",
+            "customer information",
+            "vendor information",
+            "supplier information",
+            "contract terms",
+            "business agreement",
+
+            # Legal / strategic
+            "merger plan",
+            "acquisition plan",
+            "acquisition target",
+            "legal strategy",
+            "litigation strategy",
+            "settlement terms",
         )
         if any(term in text.lower() for term in confidential_terms):
             return "Confidential"
@@ -221,19 +395,64 @@ Return only valid JSON: {\"sensitivity\": \"Public|Internal|Confidential|Highly 
         retrieved_policies = ""
         if self.retriever:
             # Create a search query based on the context
-            query = f"Data Sensitivity: {context.get('sensitivity')} | Flow: {context.get('flow_status')}"
+            query = f"""
+            Data Sensitivity: {context.get('sensitivity')}
+            Categories: {context.get('categories', [])}
+            Pattern Findings: {context.get('pattern_findings', [])}
+            Source: {context.get('source')}
+            Destination: {context.get('destination')}
+            Trust Boundary Crossed: {context.get('trust_boundary_crossed')}
+            Flow Status: {context.get('flow_status')}
+            """
             try:
                 docs = self.retriever.invoke(query)
                 retrieved_policies = "\n\n".join([d.page_content for d in docs])
             except Exception as e:
                 print(f"[PolicyRAG Retrieval Error] {e}")
 
-        sys_prompt = """You are a policy engine fallback. Decide only from the supplied corporate policies and context.
-    Allowed decisions are ALLOW, BLOCK, REDACT, FLAG, or REQUIRE_APPROVAL.
-    Do not invent policies. Never return ALLOW solely because no violation was detected.
-    Never override an existing deterministic decision. If policy evidence is missing, ambiguous, the model fails, or the requested decision is unclear, return FLAG for human review.
-    Use the most restrictive applicable outcome: BLOCK > REQUIRE_APPROVAL > REDACT > FLAG > ALLOW.
-    Return only valid JSON with decision, reason, score (0-100), and confidence_score (0.0-1.0)."""
+        sys_prompt = """You are the Policy RAG fallback evaluator for an enterprise AI governance system.
+
+            Your task is to evaluate the supplied context ONLY against the retrieved corporate policies.
+
+            IMPORTANT RULES:
+            1. Use ONLY the retrieved policies and supplied context. Do not use general knowledge or invent policy requirements.
+            2. Do not override, weaken, or reverse an existing deterministic security decision.
+            3. If a deterministic decision already exists, preserve that decision.
+            4. ALLOW must be returned only when the supplied policies clearly support allowing the request.
+            5. If no relevant policy is retrieved, the policy evidence is incomplete, the evidence is contradictory, or the requested outcome is ambiguous, return FLAG.
+            6. When uncertain, choose the more restrictive applicable outcome.
+            7. Apply the most restrictive applicable outcome using this order:
+            BLOCK > REQUIRE_APPROVAL > REDACT > FLAG > ALLOW
+            8. A sensitive data classification alone is not sufficient to invent a BLOCK. A BLOCK must be supported by an applicable retrieved policy.
+            9. Distinguish between:
+            - the sensitivity of the data,
+            - the destination/trust boundary,
+            - the applicable policy,
+            - and the resulting policy decision.
+            10. Do not treat the absence of a violation as evidence that ALLOW is permitted.
+            11. If multiple policies apply, evaluate all applicable policies and select the most restrictive outcome.
+            12. The reason must explicitly identify the policy evidence supporting the decision.
+            13. Score represents policy risk:
+                - 0-20: low risk
+                - 21-40: moderate risk
+                - 41-70: high risk
+                - 71-100: critical risk
+            14. confidence_score must reflect how strongly the retrieved policies support the decision.
+            15. If policy evidence is insufficient to make a confident decision, return FLAG with a low confidence score.
+            16. Return ONLY valid JSON.
+            17. Treat the retrieved corporate policies as authoritative only for the rules they explicitly contain.
+            18. Do not infer a policy merely because the context appears risky.
+            19. If a policy applies only to a specific data type, condition, destination, or flow, do not apply it outside that scope.
+            Allowed decisions:
+            ALLOW, BLOCK, REDACT, FLAG, REQUIRE_APPROVAL
+
+            Required JSON format:
+            {
+            "decision": "ALLOW|BLOCK|REDACT|FLAG|REQUIRE_APPROVAL",
+            "reason": "brief policy-based explanation",
+            "score": 0,
+            "confidence_score": 0.0
+            }"""
         
         user_prompt = f"Context:\n{json.dumps(context, indent=2)}\n\n"
         if retrieved_policies:
@@ -273,12 +492,28 @@ Return only valid JSON: {\"sensitivity\": \"Public|Internal|Confidential|Highly 
                 "policy_source": "LLM_FALLBACK",
             }
             
+        try:
+            score = max(0.0, min(100.0, float(llm_out.get("score", 50.0))))
+            confidence = max(
+                0.0,
+                min(1.0, float(llm_out.get("confidence_score", 0.8)))
+            )
+        except (TypeError, ValueError):
+            return {
+                "decision": "FLAG",
+                "score": 50.0,
+                "reason": "Fallback LLM returned an invalid score; human review is required.",
+                "policy_id": "LLM_FALLBACK",
+                "confidence_score": 0.0,
+                "policy_source": "LLM_FALLBACK",
+            }
+
         return {
             "decision": decision,
-            "score": float(llm_out.get("score", 50.0)),
+            "score": score,
             "reason": llm_out.get("reason", "Evaluated by LLM Fallback"),
             "policy_id": "LLM_FALLBACK",
-            "confidence_score": float(llm_out.get("confidence_score", 0.8)),
+            "confidence_score": confidence,
             "policy_source": "LLM_FALLBACK",
         }
 
@@ -312,14 +547,19 @@ Return only valid JSON: {\"sensitivity\": \"Public|Internal|Confidential|Highly 
             context_results = self.context_classifier(sanitized_prompt, sanitized_response)
         
         # 2. Merger
-        classified_sensitivity = deterministic_sensitivity or context_results.get("sensitivity", "Internal")
+        if deterministic_sensitivity:
+            classified_sensitivity = deterministic_sensitivity
+            sensitivity_confidence = 1.0
+        else:
+            classified_sensitivity = context_results.get("sensitivity", "Internal")
+            sensitivity_confidence = context_results.get("confidence", 0.5)
 
         merged_context = {
             "pattern_matches": pattern_results["matches"],
             "pattern_findings": pattern_results["findings"],
             "pattern_confidence": pattern_results["confidence_score"],
             "sensitivity": classified_sensitivity,
-            "sensitivity_confidence": context_results.get("confidence", 0.5),
+            "sensitivity_confidence": sensitivity_confidence,
             "categories": sorted(set(pattern_results["matches"]) | set(context_results.get("categories", []))),
             "source": source,
             "destination": dest,
@@ -338,16 +578,22 @@ Return only valid JSON: {\"sensitivity\": \"Public|Internal|Confidential|Highly 
         policy_source = decision_result.get("policy_source", "DETERMINISTIC")
             
         # Format the output
-        final_score = decision_result.get("score", 0.0)
-        if decision_result.get("decision") == "BLOCK":
+        final_score = float(decision_result.get("score", 0.0))
+        decision = decision_result.get("decision", "UNKNOWN")
+
+        if decision == "BLOCK":
             final_score = max(final_score, 80.0)
-            
-        if final_score >= 80.0:
             status = "FAIL"
-        elif final_score >= 40.0:
+
+        elif decision in ("REQUIRE_APPROVAL", "REDACT", "FLAG"):
+            final_score = max(final_score, 40.0)
             status = "FLAG"
+
+        elif decision == "ALLOW":
+            status = "PASS" if final_score < 40.0 else "FLAG"
+
         else:
-            status = "PASS"
+            status = "FLAG"
             
         return {
             "security_score": final_score,

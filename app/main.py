@@ -8,13 +8,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import our LangGraph State & Workflow
-from graph.workflow import controlplane_graph, security_agent_instance
+from graph.workflow import CorrectedPromptInjection, controlplane_graph, security_agent_instance
 from graph.state import ControlPlaneState
 
 app = FastAPI(title="ControlPlane.ai Gateway")
 
 # 1. Initialize Security Scanner
-injection_scanner = PromptInjection(threshold=0.5)
+injection_scanner = CorrectedPromptInjection(threshold=0.5)
 ocr_reader = None
 
 def get_ocr_reader():
@@ -57,7 +57,7 @@ def call_target_llm(prompt: str) -> tuple[str, bool]:
             False,
         )
 
-    model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    model = os.getenv("GEMINI_MODEL", "google/gemma-3-4b-it")
     last_error = ""
 
     for attempt in range(3):
@@ -99,72 +99,7 @@ async def chat_endpoint(
     if not final_input_text.strip():
         raise HTTPException(status_code=400, detail="Must provide either a text prompt or a file.")
 
-    # Pre-Flight Firewall 
-    sanitized_prompt, is_valid, risk_score = injection_scanner.scan(final_input_text)
-    
-    if not is_valid:
-        return {
-            "status": "BLOCKED",
-            "reason": "Prompt Injection / Malicious Payload Detected",
-            "preflight_risk_score": risk_score,
-            "cost_incurred": "$0.00"
-        }
-
-    preflight_patterns = security_agent_instance.pattern_scanner(final_input_text)
-    preflight_sensitivity = security_agent_instance._deterministic_sensitivity(
-        final_input_text,
-        preflight_patterns["matches"],
-    )
-
-    if preflight_sensitivity == "Highly Restricted":
-        return {
-            "status": "BLOCKED",
-            "reason": "Highly Restricted data detected before target LLM processing.",
-            "preflight_risk_score": 100.0,
-            "governance": {
-                "security_status": "FAIL",
-                "security_decision": "BLOCK",
-                "policy_source": "DETERMINISTIC",
-                "security_findings": preflight_patterns["findings"],
-                "estimated_cost": 0.0,
-            },
-        }
-
-    if (
-        preflight_sensitivity == "Confidential"
-        and destination == "external_vendor"
-    ):
-        return {
-            "status": "BLOCKED",
-            "reason": "Confidential data cannot be sent to an external LLM.",
-            "preflight_risk_score": 100.0,
-            "governance": {
-                "security_status": "FAIL",
-                "security_decision": "BLOCK",
-                "policy_source": "DETERMINISTIC",
-                "security_findings": preflight_patterns["findings"],
-                "estimated_cost": 0.0,
-            },
-        }
-    
-    # Target LLM Execution 
-    llm_response, llm_failed = call_target_llm(final_input_text)
-
-    if llm_failed:
-        return {
-            "status": "FAIL",
-            "processed_input": final_input_text.strip(),
-            "llm_response": llm_response,
-            "governance": {
-                "unified_risk_score": 100.0,
-                "security_status": "FAIL",
-                "performance_status": "NOT_RUN",
-                "cost_status": "NOT_RUN",
-                "estimated_cost": 0.0,
-            },
-        }
-    
-    # LangGraph Orchestration
+    # LangGraph owns the complete request lifecycle, including preflight and target execution.
     initial_state: ControlPlaneState = {
         "user_id": user_id,
         "use_case": use_case,
@@ -172,10 +107,16 @@ async def chat_endpoint(
         "destination": "external_vendor",
         "user_prompt": final_input_text.strip(),
         "system_prompt": None,
-        "source_documents": [],
-        "llm_response": llm_response,
+        "source_documents": [{"filename": file.filename, "content": extracted_text}] if file else [],
+        "llm_response": "",
         "model_name": os.getenv("GEMINI_MODEL", "gemini-3.6-flash"),
-        "preflight_risk_score": risk_score,
+        "target_llm": call_target_llm,
+        "preflight_scanner": injection_scanner.scan,
+        "llm_failed": False,
+        "preflight_risk_score": 0.0,
+        "preflight_blocked": False,
+        "preflight_reason": "",
+        "preflight_findings": [],
         "performance_score": 0.0,
         "performance_status": "PENDING",
         "factual_findings": [],
@@ -188,23 +129,30 @@ async def chat_endpoint(
         "policy_source": "PENDING",
         "cost_score": 0.0,
         "cost_status": "PENDING",
-        "input_tokens": len(final_input_text.split()),
-        "output_tokens": len(llm_response.split()),
-        "estimated_cost": 0.0004,
-        "ttft_latency_ms": 280.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "estimated_cost": 0.0,
+        "ttft_latency_ms": 0.0,
+        "cost_agent": {},
+        "tool_calls": [],
         "unified_risk_score": 0.0,
-        "final_action": "ALLOW",
-        "audit_log": {}
+        "final_action": "PENDING",
+        "audit_log": {},
+        "final_response": "",
     }
 
     final_state = controlplane_graph.invoke(initial_state)
 
     return {
-        "status": final_state["final_action"],
+        "status": "BLOCKED" if final_state["preflight_blocked"] else final_state["final_action"],
         "processed_input": final_input_text.strip(),
-        "llm_response": final_state["llm_response"],
+        "llm_response": final_state.get("llm_response", "") if final_state["final_action"] == "ALLOW" else "",
+        "final_response": final_state.get("final_response", ""),
         "governance": {
             "unified_risk_score": final_state["unified_risk_score"],
+            "preflight_risk_score": final_state["preflight_risk_score"],
+            "preflight_blocked": final_state["preflight_blocked"],
+            "preflight_reason": final_state["preflight_reason"],
             "security_status": final_state["security_status"],
             "security_decision": final_state["security_decision"],
             "security_findings": final_state["security_findings"],
@@ -212,7 +160,8 @@ async def chat_endpoint(
             "policy_source": final_state["policy_source"],
             "performance_status": final_state["performance_status"],
             "cost_status": final_state["cost_status"],
-            "estimated_cost": final_state["estimated_cost"]
+            "estimated_cost": final_state["estimated_cost"],
+            "audit_log": final_state["audit_log"],
         }
     }
 
