@@ -21,17 +21,17 @@ except ImportError:
 
 @dataclass
 class CostEvaluationOutput:
-    cost_score: float                # Normalized score 0.0 - 100.0 (feeds Decision Layer)
-    cost_score_normalized: float     # Normalized 0.0 - 1.0 (for weighted aggregation)
-    status: str                      # "PASS", "FLAG", "CRITICAL"
-    verdict: str                     # Executive summary sentence
-    total_cost_usd: float            # Total request cost in USD
-    model_cost_usd: float            # LLM generation cost
-    tools_cost_usd: float            # OCR, embeddings, tool costs
-    usage: UsageMetrics              # Token usage details
-    cost_breakdown: CostBreakdown    # Itemized costs
-    budget_eval: BudgetEvaluationResult  # Budget compliance & anomalies
-    latency_eval: LatencyEvaluationResult  # Latency & SLA scores
+    cost_score: float
+    cost_score_normalized: float
+    status: str
+    verdict: str
+    total_cost_usd: float
+    model_cost_usd: float
+    tools_cost_usd: float
+    usage: UsageMetrics
+    cost_breakdown: CostBreakdown
+    budget_eval: BudgetEvaluationResult
+    latency_eval: LatencyEvaluationResult
 
 
 class CostEvaluationEngine:
@@ -46,19 +46,11 @@ class CostEvaluationEngine:
         self.latency_analyzer = LatencyAnalyzer(latency_config)
 
     def evaluate(self, state: Dict[str, Any]) -> CostEvaluationOutput:
-        # 1. Usage Analysis
         usage: UsageMetrics = self.usage_analyzer.analyze(state)
-
-        # 2. Cost Analysis
         cost: CostBreakdown = self.cost_analyzer.analyze(state, usage)
-
-        # 3. Budget Analysis
         budget: BudgetEvaluationResult = self.budget_analyzer.analyze(state, usage, cost)
-
-        # 4. Latency Analysis
         latency: LatencyEvaluationResult = self.latency_analyzer.analyze(state)
 
-        # 5. Deterministic Score Calculation
         raw_score = 0.65 * budget.budget_compliance_score + 0.35 * cost.cost_efficiency_score
 
         anomaly_penalty = 0.0
@@ -76,7 +68,6 @@ class CostEvaluationEngine:
         final_cost_score = round(final_cost_score, 2)
         score_norm = round(final_cost_score / 100.0, 4)
 
-        # 6. Status Determination
         if budget.is_budget_exceeded or budget.has_critical_anomaly or final_cost_score < 40.0:
             status = "CRITICAL"
         elif final_cost_score < 70.0 or len(budget.anomalies) > 0:
@@ -84,7 +75,6 @@ class CostEvaluationEngine:
         else:
             status = "PASS"
 
-        # 7. Summary Verdict
         if status == "PASS":
             verdict = f"Passed cost checks: ${cost.total_cost_usd:.5f} total cost ({usage.total_tokens} tokens) within budget."
         elif status == "FLAG":
@@ -114,13 +104,19 @@ default_cost_engine = CostEvaluationEngine()
 
 def cost_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
-    LangGraph Node interface for ControlPlane.ai Orchestrator.
-    Accepts standard ControlPlaneState and returns updated state with cost_agent findings.
+    LangGraph Node interface for ControlPlaneState.
+    Returns all top-level keys required by ControlPlaneState in graph/state.py.
     """
     evaluation = default_cost_engine.evaluate(state)
     
     return {
         **state,
+        "cost_score": evaluation.cost_score,
+        "cost_status": evaluation.status,
+        "estimated_cost": evaluation.total_cost_usd,
+        "input_tokens": evaluation.usage.input_tokens,
+        "output_tokens": evaluation.usage.output_tokens,
+        "ttft_latency_ms": state.get("ttft_latency_ms", 0.0) or (evaluation.latency_eval.ttft_ms or 0.0),
         "cost_agent": {
             "score": evaluation.cost_score,
             "score_normalized": evaluation.cost_score_normalized,
@@ -129,8 +125,6 @@ def cost_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "total_cost_usd": evaluation.total_cost_usd,
             "model_cost_usd": evaluation.model_cost_usd,
             "tools_cost_usd": evaluation.tools_cost_usd,
-            "input_tokens": evaluation.usage.input_tokens,
-            "output_tokens": evaluation.usage.output_tokens,
             "expansion_ratio": evaluation.usage.expansion_ratio,
             "budget_compliance_score": evaluation.budget_eval.budget_compliance_score,
             "anomalies": [asdict(a) for a in evaluation.budget_eval.anomalies],
