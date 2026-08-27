@@ -333,9 +333,38 @@ class SecurityAgent:
             "litigation strategy",
             "settlement terms",
         )
-        if any(term in text.lower() for term in confidential_terms):
+        lower_text = text.lower()
+
+        # Generic/conceptual discussion should NOT be classified as Confidential.
+        # Confidentiality requires evidence that actual non-public organizational
+        # information is being disclosed.
+        generic_discussion_patterns = (
+            "explain financial forecasting",
+            "what is financial forecasting",
+            "how does financial forecasting work",
+            "explain financial reports",
+            "what is a financial report",
+            "explain business strategy",
+            "what is a business strategy",
+            "explain product roadmaps",
+            "what is a product roadmap",
+            "explain proprietary algorithms",
+            "what is a proprietary algorithm",
+            "explain system architecture",
+            "what is system architecture",
+            "explain internal policies",
+            "what is an internal policy",
+            "explain api keys",
+            "what is an api key",
+            "explain password policies",
+            "what are password policies",
+        )
+
+        if any(pattern in lower_text for pattern in generic_discussion_patterns):
+            return "Internal"
+
+        if any(term in lower_text for term in confidential_terms):
             return "Confidential"
-        return None
 
     def _sanitize_for_classifier(self, text: str, pattern_matches: list[str]) -> str:
         sanitized = text
