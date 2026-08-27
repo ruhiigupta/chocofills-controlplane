@@ -1,3 +1,7 @@
+import os
+os.environ["TRANSFORMERS_NO_TF"] = "1"  # Disables broken TF on Mac
+
+# ... (rest of your imports)
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from typing import Optional
 import uvicorn
