@@ -79,9 +79,9 @@ with tab3:
                 
                 st.divider()
                 
-                if data.get("status") == "BLOCKED" and "reason" in data:
+                if data.get("status") == "BLOCKED":
                     st.error("🚫 BLOCKED AT INGRESS (PRE-FLIGHT)")
-                    st.write(f"**Reason:** {data['reason']}")
+                    st.write(f"**Reason:** {data.get('governance', {}).get('preflight_reason', 'Policy violation detected.')}")
                 else:
                     final_action = data.get("status", "ALLOW")
                     if final_action in ["BLOCK", "FAIL"]:
