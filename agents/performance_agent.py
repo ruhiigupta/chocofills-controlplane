@@ -40,8 +40,8 @@ class PerformanceAgent:
         self.eval_model = "google/gemini-3.5-flash-lite"
         self.retriever = None
         self.web_retriever = None
-        self.performance_rag_relevance_threshold = float(
-            os.getenv("PERFORMANCE_RAG_RELEVANCE_THRESHOLD", "0.2")
+        self.performance_rag_keyword_threshold = float(
+            os.getenv("PERFORMANCE_RAG_KEYWORD_THRESHOLD", "0.05")
         )
         self._initialize_local_retriever()
         self._initialize_web_retriever()
@@ -104,13 +104,19 @@ class PerformanceAgent:
             self.web_retriever = TavilySearch(
                 tavily_api_key=api_key,
                 max_results=5,
-                include_answer=True,
+                search_depth="advanced",
+                topic="general",
+                include_answer=False,
                 include_raw_content=True,
             )
+
             print("[PerformanceAgent] Initialized Tavily web retriever.")
             return self.web_retriever
+
         except Exception as exc:
-            print(f"[PerformanceAgent] Failed to initialize Tavily web retriever: {exc}")
+            print(
+                f"[PerformanceAgent] Failed to initialize Tavily web retriever: {exc}"
+            )
             self.web_retriever = None
             return None
 
@@ -197,49 +203,74 @@ class PerformanceAgent:
         return len(overlap) / len(union) if union else 0.0
 
     def _collect_local_evidence(self, claim: str):
-        """Query the local source-document retriever and return (documents, is_sufficient)."""
+        """Retrieve potentially relevant evidence from local source documents."""
         if not getattr(self, "retriever", None):
             return [], False
 
-        scored_relevant_docs = []
-        try:
-            if hasattr(self, "vectorstore") and hasattr(self.vectorstore, "similarity_search_with_relevance_scores"):
-                scored = self.vectorstore.similarity_search_with_relevance_scores(
-                    claim,
-                    k=3,
-                )
-                if scored:
-                    scored_relevant_docs = [
-                        doc for doc, score in scored
-                        if isinstance(score, (int, float)) and float(score) >= self.performance_rag_relevance_threshold
-                    ]
-                    if scored_relevant_docs:
-                        return scored_relevant_docs, True
-        except Exception as exc:
-            print(f"[PerformanceAgent] Local relevance scoring unavailable or failed: {exc}")
+        # Prefer vector similarity when the vectorstore is available.
+        if hasattr(self, "vectorstore"):
+            try:
+                if hasattr(
+                    self.vectorstore,
+                    "similarity_search_with_relevance_scores"
+                ):
+                    scored_docs = self.vectorstore.similarity_search_with_relevance_scores(
+                        claim,
+                        k=3,
+                    )
 
+                    if scored_docs:
+                        relevant_docs = [
+                            doc
+                            for doc, score in scored_docs
+                            if isinstance(score, (int, float))
+                            and float(score) >= self.performance_rag_relevance_threshold
+                        ]
+
+                        if relevant_docs:
+                            return relevant_docs, True
+
+            except Exception as exc:
+                print(
+                    f"[Performance RAG] Vector similarity search failed: {exc}"
+                )
+
+        # Fallback to the configured retriever.
         try:
             docs = self.retriever.invoke(claim)
         except Exception as exc:
-            print(f"[Performance RAG Retrieval Error] Local retrieval failed: {exc}")
+            print(
+                f"[Performance RAG] Local retrieval failed: {exc}"
+            )
             return [], False
 
         if not docs:
             return [], False
 
+        # Do not automatically treat retrieved documents as sufficient.
+        # The factuality evaluator will determine whether they actually
+        # support the claim.
+        # Retriever results are not automatically considered relevant.
+        # Check whether the documents have meaningful lexical overlap
+        # with the claim before accepting them as local evidence.
         relevant_docs = []
+
         for doc in docs:
             content = self._coerce_evidence_text(doc)
             if not content:
                 continue
+
             score = self._keyword_overlap_score(claim, content)
-            if score > 0.0:
+
+            if score >= self.performance_rag_keyword_threshold:
                 relevant_docs.append(doc)
 
         if relevant_docs:
             return relevant_docs, True
 
-        return docs, False
+        # Local documents exist, but none are sufficiently relevant.
+        # This MUST allow retrieve_evidence() to fall back to web search.
+        return [], False
 
     def _format_local_evidence(self, docs: List[Any]) -> str:
         """Format source-document evidence with source labels."""
@@ -329,18 +360,40 @@ class PerformanceAgent:
         return "\n\n==========\n\n".join(evidence_parts)
 
     def retrieve_evidence(self, claim: str) -> str:
-        """Retrieve evidence in priority order: local source documents first, then web fallback."""
+        """
+        Retrieve factual evidence in priority order:
+
+        1. Local/source documents
+        2. Web search
+        3. NO_EVIDENCE
+
+        Retrieval only provides evidence. It does not decide factuality.
+        """
         if not claim or not claim.strip():
             return "NO_EVIDENCE"
 
-        local_docs, is_local_sufficient = self._collect_local_evidence(claim)
-        if is_local_sufficient:
-            return self._format_local_evidence(local_docs)
+        # ---------------------------------------------------------
+        # STEP 1: LOCAL SOURCE DOCUMENTS
+        # ---------------------------------------------------------
+        local_docs, local_available = self._collect_local_evidence(claim)
 
+        if local_available and local_docs:
+            local_evidence = self._format_local_evidence(local_docs)
+
+            if local_evidence != "NO_EVIDENCE":
+                return local_evidence
+
+        # ---------------------------------------------------------
+        # STEP 2: WEB SEARCH FALLBACK
+        # ---------------------------------------------------------
         web_evidence = self._fetch_web_evidence(claim)
+
         if web_evidence != "NO_EVIDENCE":
             return web_evidence
 
+        # ---------------------------------------------------------
+        # STEP 3: NO EVIDENCE
+        # ---------------------------------------------------------
         return "NO_EVIDENCE"
 
     def mock_external_rag_retrieval(self, claim: str) -> str:
