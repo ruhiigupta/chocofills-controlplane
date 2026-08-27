@@ -46,41 +46,39 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
             raise HTTPException(status_code=500, detail="OCR processing failed.")
     return extracted_text
 
-from google import genai
+from openai import OpenAI
 import os
 import time
 
 def call_target_llm(prompt: str) -> tuple[str, bool]:
-    """Real call to the target enterprise Gemini model."""
-    api_key = os.getenv("GEMINI_API_KEY", "dummy_key_if_none")
-    if api_key == "dummy_key_if_none":
-        print("[Warning] GEMINI_API_KEY not set, using simulated response.")
-        return (
-            "This is a simulated response from Gemini containing employee account details: "
-            "email=john.doe@enterprise.com.",
-            False,
+    """Call the target enterprise-style LLM through OpenRouter."""
+
+    api_key = os.getenv("OPENROUTER_API_KEY")
+
+    if not api_key:
+        print("[LLM Error] OPENROUTER_API_KEY not set.")
+        return "OpenRouter API key not configured.", True
+
+    model = os.getenv("OPENROUTER_MODEL", "google/gemma-3-4b-it")
+
+    try:
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
         )
 
-    model = os.getenv("GEMINI_MODEL", "google/gemma-3-4b-it")
-    last_error = ""
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+        )
 
-    for attempt in range(3):
-        try:
-            client = genai.Client(api_key=api_key)
-            response = client.models.generate_content(model=model, contents=prompt)
-            return response.text, False
-        except Exception as e:
-            last_error = str(e)
-            transient = any(
-                marker in last_error.lower()
-                for marker in ("429", "500", "502", "503", "504", "unavailable", "resource exhausted")
-            )
-            if not transient or attempt == 2:
-                break
-            time.sleep(2 ** attempt)
+        return response.choices[0].message.content, False
 
-    print(f"[LLM Error] {last_error}")
-    return f"Error communicating with Gemini: {last_error}", True
+    except Exception as e:
+        print(f"[LLM Error] {e}")
+        return f"Error communicating with target LLM: {e}", True
 
 @app.post("/chat")
 async def chat_endpoint(
@@ -113,7 +111,7 @@ async def chat_endpoint(
         "system_prompt": None,
         "source_documents": [{"filename": file.filename, "content": extracted_text}] if file else [],
         "llm_response": "",
-        "model_name": os.getenv("GEMINI_MODEL", "gemini-3.6-flash"),
+        "model_name": os.getenv("OPENROUTER_MODEL", "google/gemma-3-4b-it"),
         "target_llm": call_target_llm,
         "preflight_scanner": injection_scanner.scan,
         "llm_failed": False,
