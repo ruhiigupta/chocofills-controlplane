@@ -162,9 +162,7 @@ def cost_agent_node(state: ControlPlaneState) -> dict[str, Any]:
         "cost_agent": cost,
         "cost_score": cost["score"],
         "cost_status": cost["status"],
-        "estimated_cost": cost["total_cost_usd"],
-        "input_tokens": cost["input_tokens"],
-        "output_tokens": cost["output_tokens"],
+        "estimated_cost": cost["total_cost_usd"]
     }
 
 
