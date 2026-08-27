@@ -2,6 +2,7 @@ import json
 import os
 import re
 from typing import Any, Callable
+from unittest import result
 
 from langgraph.graph import END, START, StateGraph
 from llm_guard.input_scanners import PromptInjection
@@ -30,11 +31,23 @@ class CorrectedPromptInjection(PromptInjection):
         if explicit_injection:
             return prompt, False
 
-        result = self._text_classification_pipeline(
-            prompt, truncation=True, max_length=self._tokenizer.model_max_length
-        )
-        injection_score = 1 - result[0]["score"]
-        return prompt, injection_score <= self._threshold
+        results = self._pipeline(self._match_type.get_inputs(prompt))
+
+        highest_score = 0.0
+
+        for result in results:
+            injection_score = (
+                result["score"]
+                if result["label"] == "INJECTION"
+                else 1 - result["score"]
+            )
+
+            highest_score = max(highest_score, injection_score)
+
+            if injection_score > self._threshold:
+                return prompt, False, injection_score
+
+        return prompt, True, highest_score
 
 
 injection_scanner = CorrectedPromptInjection(threshold=0.5)
