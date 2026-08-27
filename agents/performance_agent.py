@@ -32,7 +32,21 @@ class PerformanceAgent:
                 model=self.eval_model,
                 response_model=ClaimList,
                 messages=[
-                    {"role": "system", "content": "You are a claim extraction agent. Break down the following text into atomic, verifiable factual claims."},
+                    {"role": "system", "content":"""
+                     Task: Break the given paragraph/sentence into a list of atomic, independently verifiable factual claims.
+
+                     Context: The paragraph/sentence was generated in response to a user's prompt. The extracted claims will be independently checked for factual correctness and relevance. Therefore, each claim must be self-contained and preserve the meaning of the original response.
+
+                     Rules:
+                     1. Express a factual assertion.
+                     2. Be independently verifiable.
+                     3. Contain enough context to stand alone.
+                     4. Preserve the original meaning.
+                     5. Be as atomic as possible.
+                     6. Do not introduce information that is not present in the original response.
+
+                     Output: Return only the extracted claims. If there are no verifiable factual claims, return an empty list.
+                     """ },
                     {"role": "user", "content": text}
                 ]
             )
@@ -56,7 +70,23 @@ class PerformanceAgent:
                 model=self.eval_model,
                 response_model=FactualityEvaluation,
                 messages=[
-                    {"role": "system", "content": "You are a fact-checking evaluator. Given a claim and evidence, determine if the evidence supports the claim."},
+                    {"role": "system", "content":"""
+                    Task: Determine whether the given claim is supported by the provided evidence.
+
+                    Context: You are evaluating a claim using the evidence provided to you. The evidence is the basis for deciding whether the claim is factually supported or not.
+
+                    Rules:
+                    1. Compare the claim directly against the provided evidence.
+                    2. Mark the claim as supported only when the evidence sufficiently establishes it.
+                    3. Do not assume missing information is true.
+                    4. Do not use outside knowledge to fill gaps.
+                    5. Distinguish between evidence that supports, contradicts, or does not establish the claim.
+                    6. Preserve uncertainty when the evidence is incomplete or ambiguous.
+                    7. Assign a confidence score between 0.0 and 1.0.
+                    8. Explain your decision using the provided evidence.
+
+                    Output: Return whether the claim is supported (true/false), the confidence score, and a brief evidence-based reasoning.
+                    """},
                     {"role": "user", "content": f"Claim: {claim}\n\nEvidence: {evidence}"}
                 ]
             )
@@ -71,7 +101,20 @@ class PerformanceAgent:
                 model=self.eval_model,
                 response_model=RelevanceEvaluation,
                 messages=[
-                    {"role": "system", "content": "Determine if the extracted claim is relevant and helpful in answering the user's prompt."},
+                    {"role": "system", "content": """
+                    Task: Determine whether the given claim is relevant to the user's prompt.
+
+                    Context: You are evaluating whether a factual claim is relevant to the user's request and helps address what the user asked.
+
+                    Rules:
+                    1. Compare the claim directly with the user's prompt.
+                    2. Mark the claim as relevant if it directly answers the question or provides necessary information to answer it.
+                    3. Do not mark a claim as relevant merely because it shares a topic or keywords with the prompt.
+                    4. Consider whether the claim contributes meaningfully to answering the user's request.
+                    5. Evaluate relevance independently of factual correctness.
+
+                    Output: Return whether the claim is relevant (true/false) and provide a brief explanation.
+                    """},
                     {"role": "user", "content": f"User Prompt: {user_prompt}\n\nClaim: {claim}"}
                 ]
             )
