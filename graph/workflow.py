@@ -134,7 +134,7 @@ def agent_fanout_node(state: ControlPlaneState) -> dict[str, Any]:
 
 def performance_agent_node(state: ControlPlaneState) -> dict[str, Any]:
     return performance_agent_instance.run_evaluation(
-        state.get("user_prompt", ""), state.get("llm_response", "")
+        state.get("user_prompt", ""), state.get("llm_response", ""), state.get("source_documents", [])
     )
 
 
