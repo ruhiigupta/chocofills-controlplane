@@ -26,6 +26,8 @@ class ControlPlaneState(TypedDict):
     # Performance Agent Outputs
     performance_score: float
     performance_status: str
+    factuality_score: float
+    relevance_score: float
     factual_findings: List[Dict[str, Any]]
     relevance_findings: List[Dict[str, Any]]
     evaluation_trace: Optional[EvaluationTrace]

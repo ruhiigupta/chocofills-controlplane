@@ -46,39 +46,68 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
             raise HTTPException(status_code=500, detail="OCR processing failed.")
     return extracted_text
 
-from openai import OpenAI
+# from openai import OpenAI
+# import os
+# import time
+
+# def call_target_llm(prompt: str) -> tuple[str, bool]:
+#     """Call the target enterprise-style LLM through OpenRouter."""
+
+#     api_key = os.getenv("OPENROUTER_API_KEY")
+
+#     if not api_key:
+#         print("[LLM Error] OPENROUTER_API_KEY not set.")
+#         return "OpenRouter API key not configured.", True
+
+#     model = os.getenv("OPENROUTER_MODEL", "google/gemma-3-4b-it")
+
+#     try:
+#         client = OpenAI(
+#             base_url="https://openrouter.ai/api/v1",
+#             api_key=api_key,
+#         )
+
+#         response = client.chat.completions.create(
+#             model=model,
+#             messages=[
+#                 {"role": "user", "content": prompt}
+#             ],
+#         )
+
+#         return response.choices[0].message.content, False
+
+#     except Exception as e:
+#         print(f"[LLM Error] {e}")
+#         return f"Error communicating with target LLM: {e}", True
+
+from google import genai
 import os
 import time
 
 def call_target_llm(prompt: str) -> tuple[str, bool]:
-    """Call the target enterprise-style LLM through OpenRouter."""
+    """Call the target enterprise-style LLM through Gemini API."""
 
-    api_key = os.getenv("OPENROUTER_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY")
 
     if not api_key:
-        print("[LLM Error] OPENROUTER_API_KEY not set.")
-        return "OpenRouter API key not configured.", True
+        print("[LLM Error] GEMINI_API_KEY not set.")
+        return "Gemini API key not configured.", True
 
-    model = os.getenv("OPENROUTER_MODEL", "google/gemma-3-4b-it")
+    model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
     try:
-        client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
-        )
+        client = genai.Client(api_key=api_key)
 
-        response = client.chat.completions.create(
+        response = client.models.generate_content(
             model=model,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
+            contents=prompt
         )
 
-        return response.choices[0].message.content, False
+        return response.text, False
 
     except Exception as e:
         print(f"[LLM Error] {e}")
-        return f"Error communicating with target LLM: {e}", True
+        return f"Error communicating with Gemini: {e}", True
 
 @app.post("/chat")
 async def chat_endpoint(
@@ -111,7 +140,8 @@ async def chat_endpoint(
         "system_prompt": None,
         "source_documents": [{"filename": file.filename, "content": extracted_text}] if file else [],
         "llm_response": "",
-        "model_name": os.getenv("OPENROUTER_MODEL", "google/gemma-3-4b-it"),
+        # "model_name": os.getenv("OPENROUTER_MODEL", "google/gemma-3-4b-it"),
+        "model_name": os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
         "target_llm": call_target_llm,
         "preflight_scanner": injection_scanner.scan,
         "llm_failed": False,
@@ -120,6 +150,8 @@ async def chat_endpoint(
         "preflight_reason": "",
         "preflight_findings": [],
         "performance_score": 0.0,
+        "factuality_score": 0.0,
+        "relevance_score": 0.0,
         "performance_status": "PENDING",
         "factual_findings": [],
         "relevance_findings": [],
@@ -160,6 +192,8 @@ async def chat_endpoint(
             "security_findings": final_state["security_findings"],
             "matched_policies": final_state["matched_policies"],
             "policy_source": final_state["policy_source"],
+            "factuality_score": final_state.get("factuality_score", 0.0),
+            "relevance_score": final_state.get("relevance_score", 0.0),
             "performance_status": final_state["performance_status"],
             "cost_status": final_state["cost_status"],
             "estimated_cost": final_state["estimated_cost"],
