@@ -20,3 +20,5 @@ easyocr
 llm-guard
 ragas
 langsmith
+langchain-huggingface
+matplotlib
