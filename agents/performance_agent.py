@@ -1,14 +1,19 @@
 import json
 import os
 import re
+import traceback
 from typing import List, Dict, Any
+
+from matplotlib import text
 
 from pydantic import BaseModel, Field
 import instructor
 from openai import OpenAI
+from google import genai
 from langchain_community.document_loaders import TextLoader
+from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from dotenv import load_dotenv
 
@@ -30,64 +35,25 @@ class RelevanceEvaluation(BaseModel):
 class PerformanceAgent:
     def __init__(self):
         # Use the configured OpenRouter provider for structured evaluator outputs.
-        self.client = instructor.from_openai(
-            OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=os.getenv("OPENROUTER_API_KEY", "dummy-key"),
-            )
-            , mode=instructor.Mode.JSON
-        )
-        self.eval_model = "google/gemini-3.5-flash-lite"
-        self.retriever = None
+        api_key = os.getenv("GEMINI_API_KEY")
+
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY not set.")
+
+        self.embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        self.client = genai.Client(api_key=api_key)
+        self.eval_model = "gemini-3.5-flash-lite"
+        
         self.web_retriever = None
         self.performance_rag_keyword_threshold = float(
             os.getenv("PERFORMANCE_RAG_KEYWORD_THRESHOLD", "0.05")
         )
-        self._initialize_local_retriever()
+        self.performance_rag_relevance_threshold = float(
+            os.getenv("PERFORMANCE_RAG_RELEVANCE_THRESHOLD", "0.3")
+        )
+        # self._initialize_local_retriever()
         self._initialize_web_retriever()
 
-    def _initialize_local_retriever(self):
-        """Initialize a local source-document retriever for performance evidence."""
-        source_dir = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "data",
-            "performance_sources",
-        )
-
-        self.retriever = None
-
-        try:
-            if not os.path.isdir(source_dir):
-                print("[PerformanceAgent] Performance source directory not found; RAG disabled.")
-                return None
-
-            docs = []
-            for filename in sorted(os.listdir(source_dir)):
-                file_path = os.path.join(source_dir, filename)
-                if not os.path.isfile(file_path):
-                    continue
-                try:
-                    loader = TextLoader(file_path)
-                    docs.extend(loader.load())
-                except Exception as exc:
-                    print(f"[PerformanceAgent] Failed to load document {file_path}: {exc}")
-
-            if not docs:
-                print("[PerformanceAgent] No performance source documents available; RAG disabled.")
-                return None
-
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-            splits = text_splitter.split_documents(docs)
-            embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-            vectorstore = FAISS.from_documents(splits, embeddings)
-            self.vectorstore = vectorstore
-            self.retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-            print(f"[PerformanceAgent] Initialized performance RAG with {len(splits)} chunks.")
-            return self.retriever
-        except Exception as exc:
-            print(f"[PerformanceAgent] Failed to initialize performance RAG: {exc}")
-            self.retriever = None
-            return None
 
     def _initialize_web_retriever(self):
         """Initialize a Tavily web retriever only when an API key is configured."""
@@ -123,33 +89,43 @@ class PerformanceAgent:
     def extract_claims(self, text: str) -> List[str]:
         """Decomposes the model response into verifiable claims."""
         try:
-            result = self.client.chat.completions.create(
+            prompt = """
+            Task: Break the given paragraph/sentence into a list of atomic,
+            independently verifiable factual claims.
+
+            Rules:
+            1. Express a factual assertion.
+            2. Be independently verifiable.
+            3. Contain enough context to stand alone.
+            4. Preserve the original meaning.
+            5. Be as atomic as possible.
+            6. Do not introduce information that is not present in the original response.
+
+            Return only the extracted claims. If there are no verifiable factual
+            claims, return an empty list.
+
+            Text:
+            """ + text
+
+            result = self.client.models.generate_content(
                 model=self.eval_model,
-                response_model=ClaimList,
-                max_tokens=2000,
-                messages=[
-                    {"role": "system", "content":"""
-                     Task: Break the given paragraph/sentence into a list of atomic, independently verifiable factual claims.
-
-                     Context: The paragraph/sentence was generated in response to a user's prompt. The extracted claims will be independently checked for factual correctness and relevance. Therefore, each claim must be self-contained and preserve the meaning of the original response.
-
-                     Rules:
-                     1. Express a factual assertion.
-                     2. Be independently verifiable.
-                     3. Contain enough context to stand alone.
-                     4. Preserve the original meaning.
-                     5. Be as atomic as possible.
-                     6. Do not introduce information that is not present in the original response.
-
-                     Output: Return only the extracted claims. If there are no verifiable factual claims, return an empty list.
-                     """ },
-                    {"role": "user", "content": text}
-                ]
+                contents=prompt,
+                config={
+                    "max_output_tokens": 2000,
+                    "response_mime_type": "application/json",
+                    "response_schema": ClaimList,
+                },
             )
-            return result.claims
+
+            claims = ClaimList.model_validate_json(result.text)
+
+            return claims.claims
+
         except Exception as e:
-            print(f"[Performance Agent] Claim extraction failed: {e}")
-            return [text] # Fallback to evaluating the whole text
+            import traceback
+            print("[Performance Agent] Claim extraction failed:")
+            traceback.print_exc()
+            return [text]
 
     def _coerce_evidence_text(self, document: Any) -> str:
         """Normalize document-like retrieval results into plain evidence text."""
@@ -202,75 +178,87 @@ class PerformanceAgent:
         union = claim_tokens | content_tokens
         return len(overlap) / len(union) if union else 0.0
 
-    def _collect_local_evidence(self, claim: str):
-        """Retrieve potentially relevant evidence from local source documents."""
-        if not getattr(self, "retriever", None):
-            return [], False
+    def _collect_local_evidence(self, claim: str, uploaded_vectorstore=None):
+        """Retrieve relevant evidence from the uploaded document."""
 
-        # Prefer vector similarity when the vectorstore is available.
-        if hasattr(self, "vectorstore"):
+        if uploaded_vectorstore is not None:
             try:
-                if hasattr(
-                    self.vectorstore,
-                    "similarity_search_with_relevance_scores"
-                ):
-                    scored_docs = self.vectorstore.similarity_search_with_relevance_scores(
-                        claim,
-                        k=3,
+                scored_docs = uploaded_vectorstore.similarity_search_with_relevance_scores(
+                    claim,
+                    k=3
+                )
+
+                relevant_docs = [
+                    doc
+                    for doc, score in scored_docs
+                    if isinstance(score, (int, float))
+                    and float(score) >= self.performance_rag_relevance_threshold
+                ]
+
+                if relevant_docs:
+                    print(
+                        f"[Performance RAG] Found {len(relevant_docs)} "
+                        f"relevant chunks in uploaded source."
                     )
-
-                    if scored_docs:
-                        relevant_docs = [
-                            doc
-                            for doc, score in scored_docs
-                            if isinstance(score, (int, float))
-                            and float(score) >= self.performance_rag_relevance_threshold
-                        ]
-
-                        if relevant_docs:
-                            return relevant_docs, True
+                    return relevant_docs, True
 
             except Exception as exc:
                 print(
-                    f"[Performance RAG] Vector similarity search failed: {exc}"
+                    f"[Performance RAG] Uploaded document retrieval failed: {exc}"
+                )
+            return [], False
+        # Uploaded document exists, but no relevant chunks were found.
+         # Let retrieve_evidence() fall back to web.
+        return [], False
+
+    def _build_uploaded_vectorstore(
+        self,
+        source_documents: List[Dict[str, Any]] = None
+    ):
+        """Build a temporary vector store from documents uploaded in this request."""
+
+        if not source_documents:
+            return None
+
+        uploaded_docs = []
+
+        for source in source_documents:
+            content = source.get("content", "")
+            filename = source.get("filename", "uploaded_file")
+
+            if content and content.strip():
+                uploaded_docs.append(
+                    Document(
+                        page_content=content,
+                        metadata={"source": filename}
+                    )
                 )
 
-        # Fallback to the configured retriever.
-        try:
-            docs = self.retriever.invoke(claim)
-        except Exception as exc:
-            print(
-                f"[Performance RAG] Local retrieval failed: {exc}"
-            )
-            return [], False
+        if not uploaded_docs:
+            return None
 
-        if not docs:
-            return [], False
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            chunk_overlap=50
+        )
 
-        # Do not automatically treat retrieved documents as sufficient.
-        # The factuality evaluator will determine whether they actually
-        # support the claim.
-        # Retriever results are not automatically considered relevant.
-        # Check whether the documents have meaningful lexical overlap
-        # with the claim before accepting them as local evidence.
-        relevant_docs = []
+        splits = text_splitter.split_documents(uploaded_docs)
 
-        for doc in docs:
-            content = self._coerce_evidence_text(doc)
-            if not content:
-                continue
+        embeddings = HuggingFaceEmbeddings(
+            model_name="all-MiniLM-L6-v2"
+        )
 
-            score = self._keyword_overlap_score(claim, content)
+        vectorstore = FAISS.from_documents(
+            splits,
+            embeddings
+        )
 
-            if score >= self.performance_rag_keyword_threshold:
-                relevant_docs.append(doc)
+        print(
+            f"[Performance RAG] Built uploaded-document vector DB "
+            f"with {len(splits)} chunks."
+        )
 
-        if relevant_docs:
-            return relevant_docs, True
-
-        # Local documents exist, but none are sufficiently relevant.
-        # This MUST allow retrieve_evidence() to fall back to web search.
-        return [], False
+        return vectorstore  
 
     def _format_local_evidence(self, docs: List[Any]) -> str:
         """Format source-document evidence with source labels."""
@@ -293,7 +281,7 @@ class PerformanceAgent:
                 if source_value:
                     source_name = os.path.basename(str(source_value))
 
-            evidence_parts.append(f"[SOURCE: performance_sources/{source_name}]\n{content.strip()}")
+            evidence_parts.append(f"[SOURCE: uploaded/{source_name}]\n{content.strip()}")
 
         if not evidence_parts:
             return "NO_EVIDENCE"
@@ -359,7 +347,37 @@ class PerformanceAgent:
 
         return "\n\n==========\n\n".join(evidence_parts)
 
-    def retrieve_evidence(self, claim: str) -> str:
+    def calculate_factuality_score(
+        self,
+        claim: str,
+        uploaded_vectorstore
+    ) -> tuple[float, List[Any]]:
+
+        if not claim or not claim.strip() or uploaded_vectorstore is None:
+            return 0.0, []
+
+        try:
+            scored_docs = uploaded_vectorstore.similarity_search_with_relevance_scores(
+                claim,
+                k=3
+            )
+
+            if not scored_docs:
+                return 0.0, []
+
+            scores = [float(score) for _, score in scored_docs]
+
+            highest_score = max(scores)
+
+            top_docs = [doc for doc, _ in scored_docs]
+
+            return highest_score, top_docs
+
+        except Exception:
+            return 0.0, []
+
+
+    def retrieve_evidence(self, claim: str, uploaded_vectorstore=None) -> str:
         """
         Retrieve factual evidence in priority order:
 
@@ -375,7 +393,7 @@ class PerformanceAgent:
         # ---------------------------------------------------------
         # STEP 1: LOCAL SOURCE DOCUMENTS
         # ---------------------------------------------------------
-        local_docs, local_available = self._collect_local_evidence(claim)
+        local_docs, local_available = self._collect_local_evidence(claim,uploaded_vectorstore)
 
         if local_available and local_docs:
             local_evidence = self._format_local_evidence(local_docs)
@@ -410,120 +428,267 @@ class PerformanceAgent:
             }
 
         try:
-            result = self.client.chat.completions.create(
+            prompt = f"""
+        You are a factuality evaluator in an enterprise AI governance system.
+
+        Your task is to determine whether a claim is supported by the evidence provided.
+
+        Rules:
+        1. Evaluate the claim only against the provided evidence.
+        2. Do not use outside knowledge to fill gaps.
+        3. Do not assume a claim is true merely because it sounds plausible.
+        4. Mark supported=true only when the evidence sufficiently establishes the claim.
+        5. Mark supported=false when the evidence contradicts the claim.
+        6. Mark supported=false when the evidence is insufficient.
+        7. Preserve uncertainty when evidence is incomplete, ambiguous, or conflicting.
+        8. Do not treat keyword overlap as factual support.
+        9. Evaluate the meaning of the evidence in relation to the claim.
+        10. Give confidence between 0.0 and 1.0.
+        11. Provide brief reasoning based only on the supplied evidence.
+        12. Do not fabricate citations, sources, or facts.
+
+        Claim:
+        {claim}
+
+        Evidence:
+        {evidence}
+        """
+
+            result = self.client.models.generate_content(
                 model=self.eval_model,
-                response_model=FactualityEvaluation,
-                max_tokens=2000,
-                messages=[
-                    {"role": "system", "content":"""
-You are a factuality evaluator in an enterprise AI governance system.
-
-Your task is to determine whether a claim is supported by the evidence provided.
-
-The evidence may come from:
-1. Internal source documents
-2. External web sources
-
-Rules:
-1. Evaluate the claim only against the provided evidence.
-2. Do not use outside knowledge to fill gaps.
-3. Do not assume a claim is true merely because it sounds plausible.
-4. Mark supported=true only when the evidence sufficiently establishes the claim.
-5. Mark supported=false when the evidence contradicts the claim.
-6. Mark supported=false when the evidence is insufficient to establish the claim.
-7. Preserve uncertainty when evidence is incomplete, ambiguous, or conflicting.
-8. Do not treat keyword overlap as factual support.
-9. Do not treat the existence of a retrieved document as proof that the claim is true.
-10. Evaluate the meaning of the evidence in relation to the claim.
-11. If the evidence is NO_EVIDENCE, the claim cannot be considered supported.
-12. Give a confidence score between 0.0 and 1.0.
-13. Provide brief reasoning based only on the supplied evidence.
-14. Do not fabricate citations, sources, or facts.
-
-Return only the structured output required by the response schema.
-                    """},
-                    {"role": "user", "content": f"Claim: {claim}\n\nEvidence: {evidence}"}
-                ]
+                contents=prompt,
+                config={
+                    "max_output_tokens": 2000,
+                    "response_mime_type": "application/json",
+                    "response_schema": FactualityEvaluation,
+                },
             )
-            return result.model_dump()
+
+            evaluation = FactualityEvaluation.model_validate_json(result.text)
+
+            return evaluation.model_dump()
+
         except Exception as e:
-            return {"is_supported": False, "confidence": 0.0, "reasoning": "Evaluation failed"}
+            print(f"[PerformanceAgent] Factuality evaluation failed: {e}")
+            return {
+                "is_supported": False,
+                "confidence": 0.0,
+                "reasoning": "Evaluation failed"
+            }
+
+    def calculate_relevance_score(
+        self,
+        prompt_embedding,
+        claim: str
+    ) -> float:
+        """
+        Calculate deterministic semantic similarity between
+        the user's prompt and a claim.
+        """
+
+        if not claim:
+            return 0.0
+
+        #prompt_embedding = self.embeddings.embed_query(user_prompt)
+        claim_embedding = self.embeddings.embed_query(claim)
+
+        # cosine similarity
+        dot_product = sum(
+            a * b
+            for a, b in zip(prompt_embedding, claim_embedding)
+        )
+
+        prompt_norm = sum(a * a for a in prompt_embedding) ** 0.5
+        claim_norm = sum(b * b for b in claim_embedding) ** 0.5
+
+        if prompt_norm == 0 or claim_norm == 0:
+            return 0.0
+
+        return dot_product / (prompt_norm * claim_norm)
 
     def evaluate_relevance(self, user_prompt: str, claim: str) -> Dict[str, Any]:
         """Checks if a claim is relevant to the original user prompt."""
+
         try:
-            result = self.client.chat.completions.create(
+            prompt = f"""
+        Task: Determine whether the given claim is relevant to the user's prompt.
+
+        Rules:
+        1. Compare the claim directly with the user's prompt.
+        2. Mark the claim as relevant if it directly answers the question or provides necessary information.
+        3. Do not mark a claim as relevant merely because it shares a topic or keywords.
+        4. Consider whether the claim contributes meaningfully to answering the user's request.
+        5. Evaluate relevance independently of factual correctness.
+
+        User Prompt:
+        {user_prompt}
+
+        Claim:
+        {claim}
+        """
+
+            result = self.client.models.generate_content(
                 model=self.eval_model,
-                response_model=RelevanceEvaluation,
-                max_tokens=2000,
-                messages=[
-                    {"role": "system", "content": """
-                    Task: Determine whether the given claim is relevant to the user's prompt.
-
-                    Context: You are evaluating whether a factual claim is relevant to the user's request and helps address what the user asked.
-
-                    Rules:
-                    1. Compare the claim directly with the user's prompt.
-                    2. Mark the claim as relevant if it directly answers the question or provides necessary information to answer it.
-                    3. Do not mark a claim as relevant merely because it shares a topic or keywords with the prompt.
-                    4. Consider whether the claim contributes meaningfully to answering the user's request.
-                    5. Evaluate relevance independently of factual correctness.
-
-                    Output: Return whether the claim is relevant (true/false) and provide a brief explanation.
-                    """},
-                    {"role": "user", "content": f"User Prompt: {user_prompt}\n\nClaim: {claim}"}
-                ]
+                contents=prompt,
+                config={
+                    "max_output_tokens": 2000,
+                    "response_mime_type": "application/json",
+                    "response_schema": RelevanceEvaluation,
+                },
             )
-            return result.model_dump()
-        except Exception as e:
-            return {"is_relevant": False, "reasoning": "Evaluation failed"}
 
-    def run_evaluation(self, user_prompt: str, llm_response: str) -> Dict[str, Any]:
+            evaluation = RelevanceEvaluation.model_validate_json(result.text)
+
+            return evaluation.model_dump()
+
+        except Exception as e:
+            print(f"[PerformanceAgent] Relevance evaluation failed: {e}")
+            return {
+                "is_relevant": False,
+                "reasoning": "Evaluation failed"
+            }
+
+    def run_evaluation(
+        self,
+        user_prompt: str,
+        llm_response: str,
+        source_documents: List[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Main orchestrator for the Performance Agent node."""
-        
+
         claims = self.extract_claims(llm_response)
-        
+        prompt_embedding = self.embeddings.embed_query(user_prompt)
         factual_findings = []
         relevance_findings = []
-        
+
         total_claims = len(claims)
-        supported_claims = 0
-        relevant_claims = 0
-        
+
+        factuality_scores = []
+        relevance_scores = []
+
+        # Build uploaded-document vector DB ONCE per request
+        uploaded_vectorstore = self._build_uploaded_vectorstore(source_documents)
+
         for claim in claims:
-            # 1. Evidence Retrieval (real retrieval only; no fabrication)
-            evidence = self.retrieve_evidence(claim)
 
-            # 2. Factuality Check
-            fact_eval = self.evaluate_factuality(claim, evidence)
-            factual_findings.append({
-                "claim": claim,
-                "evidence_used": evidence,
-                **fact_eval
-            })
-            if fact_eval.get("is_supported"):
-                supported_claims += 1
-                
-            # 3. Relevance Check
-            rel_eval = self.evaluate_relevance(user_prompt, claim)
-            relevance_findings.append({
-                "claim": claim,
-                **rel_eval
-            })
-            if rel_eval.get("is_relevant"):
-                relevant_claims += 1
+            # ---------------------------------------------------------
+            # 1. FACTUALITY
+            # ---------------------------------------------------------
 
-        # Calculate final aggregated scores (0-100 scale)
-        factuality_score = (supported_claims / total_claims * 100) if total_claims > 0 else 100.0
-        relevance_score = (relevant_claims / total_claims * 100) if total_claims > 0 else 100.0
-        
-        # Performance Score = weighted average of Factuality and Relevance
-        performance_score = (0.7 * factuality_score) + (0.3 * relevance_score)
-        
-        status = "PASS" if performance_score >= 80 else "NEEDS_REVIEW"
-        
+            score, top_docs = self.calculate_factuality_score(
+                claim,
+                uploaded_vectorstore
+            )
+
+            if score >= 0.3:
+                # Deterministic factuality score
+                claim_factuality_score = score
+
+                factual_findings.append({
+                    "claim": claim,
+                    "evidence_used": self._format_local_evidence(top_docs),
+                    "is_supported": True,
+                    "confidence": score,
+                    "reasoning": "Claim has sufficiently relevant evidence in the uploaded source document."
+                })
+
+            else:
+                # Weak retrieval → LLM fallback
+                evidence = self.retrieve_evidence(
+                    claim,
+                    uploaded_vectorstore
+                )
+
+                fact_eval = self.evaluate_factuality(
+                    claim,
+                    evidence
+                )
+
+                # LLM gives only a binary fallback decision
+                claim_factuality_score = (
+                    1.0 if fact_eval.get("is_supported") else 0.0
+                )
+
+                factual_findings.append({
+                    "claim": claim,
+                    "evidence_used": evidence,
+                    **fact_eval
+                })
+
+            factuality_scores.append(claim_factuality_score)
+
+            # ---------------------------------------------------------
+            # 2. RELEVANCE
+            # ---------------------------------------------------------
+
+            relevance_score = self.calculate_relevance_score(
+                prompt_embedding,
+                claim
+            )
+
+            if relevance_score >= 0.3:
+                # Deterministic relevance
+                claim_relevance_score = relevance_score
+
+                relevance_findings.append({
+                    "claim": claim,
+                    "is_relevant": True,
+                    "confidence": relevance_score,
+                    "reasoning": "Claim has sufficiently high semantic similarity to the user's prompt."
+                })
+
+            else:
+                # Weak semantic similarity → LLM fallback
+                rel_eval = self.evaluate_relevance(
+                    user_prompt,
+                    claim
+                )
+
+                claim_relevance_score = (
+                    1.0 if rel_eval.get("is_relevant") else 0.0
+                )
+
+                relevance_findings.append({
+                    "claim": claim,
+                    **rel_eval
+                })
+
+            relevance_scores.append(claim_relevance_score)
+
+        # ---------------------------------------------------------
+        # 3. FINAL SCORES
+        # ---------------------------------------------------------
+
+        factuality_score = (
+            sum(factuality_scores) / total_claims * 100
+            if total_claims > 0
+            else 100.0
+        )
+
+        relevance_score = (
+            sum(relevance_scores) / total_claims * 100
+            if total_claims > 0
+            else 100.0
+        )
+
+        performance_score = (
+            0.65 * factuality_score
+            + 0.35 * relevance_score
+        )
+
+        if performance_score >= 60:
+            status = "PASS"
+        elif performance_score >= 40:
+            status = "NEEDS_REVIEW"
+        elif performance_score >= 25:
+            status = "FLAG"
+        else:
+            status = "BLOCK"
+
         return {
             "performance_score": performance_score,
+            "factuality_score": factuality_score,
+            "relevance_score": relevance_score,
             "performance_status": status,
             "factual_findings": factual_findings,
             "relevance_findings": relevance_findings
