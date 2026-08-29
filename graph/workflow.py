@@ -107,6 +107,13 @@ def route_after_preflight(state: ControlPlaneState) -> str:
 
 
 def target_llm_node(state: ControlPlaneState) -> dict[str, Any]:
+
+    if state.get("evaluation_mode") == "evaluate_existing":
+        return {
+            "llm_failed": False,
+            "final_action": "PENDING"
+        }
+     
     if state.get("llm_response") and "target_llm" not in state:
         return {"llm_failed": False, "final_action": "PENDING"}
 
