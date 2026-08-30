@@ -18,36 +18,30 @@ performance_agent_instance = PerformanceAgent()
 
 
 class CorrectedPromptInjection(PromptInjection):
-    def scan(self, prompt: str) -> tuple[str, bool]:
+    def __init__(self, threshold=0.5):
+        super().__init__(threshold=threshold)
+
+    def scan(self, prompt: str) -> tuple[str, bool, float]:
         if prompt.strip() == "":
-            return prompt, True
+            return prompt, True, 0.0
 
         explicit_injection = re.search(
-            r"(?:ignore|disregard|override|forget)\s+(?:all\s+)?(?:previous|prior|earlier)\s+instructions|"
+            r"(?:ignore|disregard|override|forget)\s+(?:all\s+)?"
+            r"(?:previous|prior|earlier)\s+instructions|"
             r"reveal\s+(?:the\s+)?(?:hidden\s+)?system\s+prompt",
             prompt,
             re.IGNORECASE,
         )
+
         if explicit_injection:
-            return prompt, False
+            return prompt, False, 1.0
 
-        results = self._pipeline(self._match_type.get_inputs(prompt))
-
-        highest_score = 0.0
-
-        for result in results:
-            injection_score = (
-                result["score"]
-                if result["label"] == "INJECTION"
-                else 1 - result["score"]
-            )
-
-            highest_score = max(highest_score, injection_score)
-
-            if injection_score > self._threshold:
-                return prompt, False, injection_score
-
-        return prompt, True, highest_score
+        try:
+            _, is_valid = super().scan(prompt)
+            return prompt, is_valid, 0.0 if is_valid else 1.0
+        except Exception as e:
+            print(f"[Prompt Injection Scanner] Error: {e}")
+            return prompt, True, 0.0
 
 
 injection_scanner = CorrectedPromptInjection(threshold=0.5)
