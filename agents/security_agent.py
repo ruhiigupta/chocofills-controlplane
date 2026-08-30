@@ -1043,10 +1043,16 @@ class SecurityAgent:
         policy_source = decision_result.get("policy_source", "DETERMINISTIC")
             
         # Format the output
+        
         final_score = float(decision_result.get("score", 0.0))
         decision = decision_result.get("decision", "UNKNOWN")
 
-        if decision == "BLOCK":
+        # Security risk >= 65 must be blocked.
+        if final_score >= 65.0:
+            decision = "BLOCK"
+            status = "FAIL"
+
+        elif decision == "BLOCK":
             final_score = max(final_score, 80.0)
             status = "FAIL"
 

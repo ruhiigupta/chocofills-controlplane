@@ -308,7 +308,7 @@ def decision_layer_node(state: ControlPlaneState) -> dict[str, Any]:
     elif security_decision == "REDACT":
         final_action = "REWRITE"
     elif security_decision in {"REQUIRE_APPROVAL", "FLAG"}:
-        final_action = "ESCALATE"
+        final_action = "BLOCK"
     elif state.get("performance_status") != "PASS" or state.get("cost_status") == "CRITICAL":
         final_action = "ESCALATE"
     else:
