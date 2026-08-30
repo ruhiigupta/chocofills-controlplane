@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .env
 data/audit_log.jsonl
+data/controlplane_audit.db
+
+*.db
+
+.venv311/
+.vscode/
