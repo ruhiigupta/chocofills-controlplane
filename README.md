@@ -35,6 +35,25 @@ curl.exe -X POST http://localhost:8000/chat -F "user_id=local" -F "prompt=What i
 
 The response includes the final action, released response when allowed, agent statuses, unified risk, and audit information. Audit entries are appended to `data/audit_log.jsonl`.
 
+### TruffleHog CLI requirement
+The security gate uses the TruffleHog CLI executable, not a Python module. The runtime default is:
+
+```powershell
+$env:TRUFFLEHOG_PATH = 'C:\trufflehog\trufflehog.exe'
+```
+
+If the executable is present at that path, the project will scan only the supplied prompt/response text via a temporary file. It does not scan the repository itself.
+
+Example smoke test:
+
+```powershell
+$testfile = Join-Path $env:TEMP ('th_' + [guid]::NewGuid().ToString('N') + '.txt')
+Set-Content -Path $testfile -Encoding utf8 -Value 'ghp_abcdefghijklmnopqrstuvwxyz123456789012345678'
+C:\trufflehog\trufflehog.exe filesystem --json $testfile
+```
+
+This is a system dependency, not a package dependency in the Python environment.
+
 ## Tests
 Run the complete suite:
 
