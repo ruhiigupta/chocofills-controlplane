@@ -207,8 +207,7 @@ class PerformanceAgent:
                     f"[Performance RAG] Uploaded document retrieval failed: {exc}"
                 )
             return [], False
-        # Uploaded document exists, but no relevant chunks were found.
-         # Let retrieve_evidence() fall back to web.
+        
         return [], False
 
     def _build_uploaded_vectorstore(
@@ -567,14 +566,34 @@ class PerformanceAgent:
         relevance_scores = []
 
         # Build uploaded-document vector DB ONCE per request
-        uploaded_vectorstore = self._build_uploaded_vectorstore(source_documents)
+        if source_documents:
+            uploaded_vectorstore = self._build_uploaded_vectorstore(
+                source_documents
+            )
+        else:
+            web_evidence = self._fetch_web_evidence(llm_response)
+
+            if web_evidence != "NO_EVIDENCE":
+                tavily_documents = [{
+                    "filename": "Tavily Web Evidence",
+                    "content": web_evidence
+                }]
+
+                uploaded_vectorstore = self._build_uploaded_vectorstore(
+                    tavily_documents
+                )
+            else:
+                uploaded_vectorstore = None
+
+
 
         for claim in claims:
 
             # ---------------------------------------------------------
             # 1. FACTUALITY
             # ---------------------------------------------------------
-
+            
+            
             score, top_docs = self.calculate_factuality_score(
                 claim,
                 uploaded_vectorstore

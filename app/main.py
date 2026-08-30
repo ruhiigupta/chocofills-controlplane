@@ -114,7 +114,9 @@ async def chat_endpoint(
     user_id: str = Form(...),
     use_case: str = Form("internal_copilot"),
     prompt: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None)
+    file: Optional[UploadFile] = File(None),
+    evaluation_mode: str = Form("generate"),
+    existing_response: Optional[str] = Form(None)
 ):
     final_input_text = ""
     destination = "external_vendor"
@@ -139,7 +141,8 @@ async def chat_endpoint(
         "user_prompt": final_input_text.strip(),
         "system_prompt": None,
         "source_documents": [{"filename": file.filename, "content": extracted_text}] if file else [],
-        "llm_response": "",
+        "llm_response": existing_response or "",
+        "evaluation_mode": evaluation_mode,
         # "model_name": os.getenv("OPENROUTER_MODEL", "google/gemma-3-4b-it"),
         "model_name": os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
         "target_llm": call_target_llm,
@@ -180,7 +183,7 @@ async def chat_endpoint(
     return {
         "status": "BLOCKED" if final_state["preflight_blocked"] else final_state["final_action"],
         "processed_input": final_input_text.strip(),
-        "llm_response": final_state.get("llm_response", "") if final_state["final_action"] == "ALLOW" else "",
+        "llm_response": final_state.get("llm_response", ""),
         "final_response": final_state.get("final_response", ""),
         "governance": {
             "unified_risk_score": final_state["unified_risk_score"],
@@ -198,6 +201,11 @@ async def chat_endpoint(
             "cost_status": final_state["cost_status"],
             "estimated_cost": final_state["estimated_cost"],
             "audit_log": final_state["audit_log"],
+            "security_risk": final_state["security_score"],
+            "performance_score": final_state["performance_score"],
+            "cost_risk": 100-final_state["cost_score"],
+            "unified_risk_score": final_state["unified_risk_score"],
+            "final_action": final_state["final_action"],
         }
     }
 
