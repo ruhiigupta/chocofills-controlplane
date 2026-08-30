@@ -12,6 +12,7 @@ class ControlPlaneState(TypedDict):
     system_prompt: Optional[str]
     source_documents: List[Dict[str, str]]
     llm_response: str
+    evaluation_mode: str
     model_name: str
     target_llm: Optional[Callable[..., Any]]
     preflight_scanner: Optional[Callable[..., Any]]
