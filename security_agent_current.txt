@@ -1,9 +1,6 @@
 import os
 import re
 import json
-import shutil
-import subprocess
-import tempfile
 from typing import Dict, Any
 from openai import OpenAI
 from langchain_community.document_loaders import TextLoader
@@ -17,15 +14,11 @@ load_dotenv()
 class SecurityAgent:
     def __init__(self):
         # OpenRouter Configuration
-        self.api_key = os.getenv("OPENROUTER_API_KEY")
-        self.trufflehog_path = os.getenv("TRUFFLEHOG_PATH", r"C:\trufflehog\trufflehog.exe")
-        if self.api_key:
-            self.client = OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=self.api_key,
-            )
-        else:
-            self.client = None
+        self.api_key = os.getenv("OPENROUTER_API_KEY", "dummy_key_for_testing")
+        self.client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=self.api_key,
+        )
         # Using a highly-capable, free open source model on OpenRouter
         self.model = "nvidia/nemotron-3.5-lightning"
 
@@ -49,12 +42,12 @@ class SecurityAgent:
 
         # Pattern Scanner definitions
         self.pii_patterns = {
-            "API Key / Secret Token": r'(?i)(api[\s_-]?key|secret[\s_-]?key|bearer|token)[\s=:]+[\'"]?([a-zA-Z0-9_\-]{20,})[\'"]?',
-            "Password": r"(?i)\bpassword\b(?:[\s=:]+|[\s]+is[\s]+)['\"]?[^\s'\"]{8,}['\"]?",
+            "API Key / Secret Token": r"(?i)(api[_-]?key|secret[_-]?key|bearer|token)[\s=:]+['\"]?([a-zA-Z0-9_\-]{20,})['\"]?",
+            "Password": r"(?i)password[\s=:]+['\"]?[^\s'\"]{8,}['\"]?",
             "Credit Card Number": r"\b(?:\d[ -]*?){13,16}\b",
             "SSN / Tax ID": r"\b\d{3}-\d{2}-\d{4}\b",
             "Email Address": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
-            "Phone Number": r"(?<!\d)(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}(?!\d)"
+            "Phone Number": r"\b\+?[1-9]\d{1,14}\b"
         }
         
         # Policy Database
@@ -81,31 +74,20 @@ class SecurityAgent:
             "internal_systems": ["db", "backend", "internal_api"],
             "external_systems": ["user_browser", "public_api", "external_vendor"]
         }
-        self.trufflehog_path = (
-            os.getenv("TRUFFLEHOG_PATH")
-            or shutil.which("trufflehog")
-            or (
-                r"C:\trufflehog\trufflehog.exe"
-                if os.path.exists(r"C:\trufflehog\trufflehog.exe")
-                else None
-            )
-        )
 
     def _call_llm_json(self, system_prompt: str, user_prompt: str) -> dict:
         """Helper to call OpenRouter LLM expecting JSON output."""
         try:
-            if not self.api_key or self.client is None:
-                print("[SecurityAgent] OPENROUTER_API_KEY is not configured; skipping real LLM call.")
+            if self.api_key == "dummy_key_for_testing":
                 return {}
-
+                
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                response_format={"type": "json_object"},
-                max_tokens=500
+                response_format={"type": "json_object"}
             )
             # Sometimes models return markdown blocks even with json_object format
             content = response.choices[0].message.content.strip()
@@ -120,367 +102,33 @@ class SecurityAgent:
 
     def pattern_scanner(self, text: str) -> Dict[str, Any]:
         """Layer 1: Deterministic Pattern Scanning."""
-
         matches_found = []
-        findings = []
-
-        # Store spans of high-priority sensitive matches so lower-priority
-        # detectors do not classify substrings inside them.
-        protected_spans = []
-
-        # Detect highly sensitive credentials first.
-        priority_patterns = [
-            "API Key / Secret Token",
-            "Password",
-            "Credit Card Number",
-            "SSN / Tax ID",
+        for entity_type, pattern in self.pii_patterns.items():
+            if re.search(pattern, text):
+                matches_found.append(entity_type)
+        findings = [
+            {
+                "type": entity_type,
+                "matched": True,
+                "confidence": 1.0 if entity_type == "API Key / Secret Token" else 0.98,
+            }
+            for entity_type in matches_found
         ]
-
-        for entity_type in priority_patterns:
-            pattern = self.pii_patterns[entity_type]
-
-            for match in re.finditer(pattern, text):
-                matches_found.append(entity_type)
-
-                findings.append({
-                    "type": entity_type,
-                    "matched": True,
-                    "confidence": 1.0 if entity_type == "API Key / Secret Token" else 0.98,
-                })
-
-                protected_spans.append(match.span())
-
-                # One finding per entity type is enough for the current API.
-                break
-
-        # Detect remaining PII types, but ignore matches that occur inside
-        # already-detected sensitive values.
-        for entity_type in self.pii_patterns:
-            if entity_type in priority_patterns:
-                continue
-
-            pattern = self.pii_patterns[entity_type]
-
-            for match in re.finditer(pattern, text):
-                start, end = match.span()
-
-                overlaps_protected = any(
-                    start < protected_end and end > protected_start
-                    for protected_start, protected_end in protected_spans
-                )
-
-                if overlaps_protected:
-                    continue
-
-                matches_found.append(entity_type)
-
-                findings.append({
-                    "type": entity_type,
-                    "matched": True,
-                    "confidence": 0.98,
-                })
-
-                break
-
         return {
             "type": "PatternScanner",
-            "confidence_score": max(
-                (finding["confidence"] for finding in findings),
-                default=0.0
-            ),
+            "confidence_score": max((finding["confidence"] for finding in findings), default=0.0),
             "matches": matches_found,
             "findings": findings,
         }
 
-    def _detect_obvious_secret_patterns(self, text: str) -> list[str]:
-        """Fall back to deterministic credential detection when TruffleHog misses obvious tokens."""
-        if not isinstance(text, str):
-            return []
-
-        cleaned = text.strip()
-        if not cleaned:
-            return []
-
-        direct_token_patterns = [
-            r"(?i)\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
-            r"(?i)\bgithub_pat_[A-Za-z0-9_]{20,}\b",
-            r"(?i)\bxox[bapors]-[A-Za-z0-9-]{10,}\b",
-            r"(?i)\bAKIA[0-9A-Z]{16}\b",
-            r"(?i)\bASIA[0-9A-Z]{16}\b",
-            r"(?i)\bAIza[0-9A-Za-z\-_]{20,}\b",
-            r"(?i)\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b",
-            r"(?i)-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----",
-        ]
-
-        for pattern in direct_token_patterns:
-            if re.search(pattern, cleaned):
-                return ["Credential"]
-
-        assignment_patterns = [
-            r"(?i)(?:^|[\s;,(\[{])(?:api[_ -]?key|secret[_ -]?key|access[_ -]?key[_ -]?id|secret[_ -]?access[_ -]?key|token|password|private[_ -]?key)\s*[:=]\s*['\"]?[A-Za-z0-9_\-./+=@:%#]{8,}['\"]?(?=\s|$|[;,)\]}.])",
-            r"(?i)(?:^|[\s;,(\[{])(?:authorization)\s*:\s*bearer\s+[A-Za-z0-9._~+\-/=]{20,}(?=\s|$|[;,)\]}.])",
-        ]
-
-        for pattern in assignment_patterns:
-            if re.search(pattern, cleaned):
-                return ["Credential"]
-
-        # Do not classify generic mentions like "What is an API key?" or "How should passwords be stored?"
-        # A value must be present in an actual credential assignment or token-bearing format.
-        return []
-
-    def _redact_sensitive_values(self, text: str) -> str:
-        """Strip obvious credential material from any returned reason text."""
-        if not isinstance(text, str):
-            return ""
-
-        redacted = re.sub(
-            r"(?i)(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[bapors]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{20,}|sk_(?:live|test)_[A-Za-z0-9]{16,})",
-            "[REDACTED_CREDENTIAL]",
-            text,
-        )
-        redacted = re.sub(
-            r"(?i)((?:api[_ -]?key|secret[_ -]?key|access[_ -]?key[_ -]?id|secret[_ -]?access[_ -]?key|token|password|private[_ -]?key)[\s:=]+)['\"]?[A-Za-z0-9_\-./=+]{12,}['\"]?",
-            r"\1[REDACTED_CREDENTIAL]",
-            redacted,
-        )
-        return redacted.strip() or "Sensitive content detected; credential material has been redacted."
-
-    def _scan_with_trufflehog(self, text: str) -> Dict[str, Any]:
-        """Scan text with TruffleHog and return only safe metadata."""
-
-        if not isinstance(text, str) or not text.strip():
-            return {
-                "available": True,
-                "found": False,
-                "categories": [],
-                "reason": "No content to scan.",
-            }
-
-        cleaned = text.strip()
-
-        scanner_path = (
-            self.trufflehog_path
-            or os.getenv("TRUFFLEHOG_PATH")
-            or shutil.which("trufflehog")
-        )
-
-        if not scanner_path or not os.path.isfile(scanner_path):
-            print("[SecurityAgent] TruffleHog unavailable.")
-
-            # Deterministic fallback for obvious credential formats.
-            fallback = self._detect_obvious_secret_patterns(cleaned)
-
-            if fallback:
-                return {
-                    "available": False,
-                    "found": True,
-                    "categories": fallback,
-                    "reason": "A credential-like value was detected by deterministic fallback.",
-                }
-
-            return {
-                "available": False,
-                "found": False,
-                "categories": [],
-                "reason": "TruffleHog unavailable; continuing with LLM classification.",
-            }
-
-        temp_handle, temp_path = tempfile.mkstemp(
-            prefix="security_agent_th_",
-            suffix=".txt",
-        )
-        os.close(temp_handle)
-
-        try:
-            with open(
-                temp_path,
-                "w",
-                encoding="utf-8",
-                errors="surrogateescape",
-            ) as file_handle:
-                file_handle.write(cleaned)
-
-            completed = subprocess.run(
-                [
-                    scanner_path,
-                    "filesystem",
-                    "--json",
-                    "--results=verified,unverified,unknown",
-                    temp_path,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                check=False,
-            )
-
-            stdout = completed.stdout or ""
-            stderr = completed.stderr or ""
-
-            # Exit code 1 means the scanner itself failed.
-            if completed.returncode == 1:
-                print(
-                    f"[SecurityAgent] TruffleHog scan failed: "
-                    f"{self._redact_sensitive_values(stderr)}"
-                )
-
-                fallback = self._detect_obvious_secret_patterns(cleaned)
-
-                if fallback:
-                    return {
-                        "available": True,
-                        "found": True,
-                        "categories": fallback,
-                        "reason": "A credential-like value was detected by deterministic fallback.",
-                    }
-
-                return {
-                    "available": True,
-                    "found": False,
-                    "categories": [],
-                    "reason": "TruffleHog scan failed; continuing with LLM classification.",
-                }
-
-            findings = []
-
-            for line in stdout.splitlines():
-                line = line.strip()
-
-                if not line.startswith("{"):
-                    continue
-
-                try:
-                    result = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                # Actual TruffleHog finding
-                if (
-                    result.get("DetectorName")
-                    or result.get("DetectorType")
-                ):
-                    findings.append(result)
-
-            if findings:
-                categories = []
-
-                for finding in findings:
-                    detector = finding.get("DetectorName")
-
-                    if isinstance(detector, str) and detector.strip():
-                        categories.append(detector.strip())
-
-                categories = list(dict.fromkeys(categories))
-
-                return {
-                    "available": True,
-                    "found": True,
-                    "categories": categories or ["credential"],
-                    "reason": (
-                        "TruffleHog detected credential or secret material "
-                        "in the supplied context."
-                    ),
-                }
-
-            # IMPORTANT:
-            # Scanner ran successfully but detected nothing.
-            fallback = self._detect_obvious_secret_patterns(cleaned)
-
-            if fallback:
-                return {
-                    "available": True,
-                    "found": True,
-                    "categories": fallback,
-                    "reason": (
-                        "A credential-like value was detected by "
-                        "deterministic fallback."
-                    ),
-                }
-
-            return {
-                "available": True,
-                "found": False,
-                "categories": [],
-                "reason": "TruffleHog completed successfully with no detected secrets.",
-            }
-
-        except subprocess.TimeoutExpired:
-            print("[SecurityAgent] TruffleHog timed out.")
-
-            fallback = self._detect_obvious_secret_patterns(cleaned)
-
-            if fallback:
-                return {
-                    "available": True,
-                    "found": True,
-                    "categories": fallback,
-                    "reason": "A credential-like value was detected by deterministic fallback.",
-                }
-
-            return {
-                "available": True,
-                "found": False,
-                "categories": [],
-                "reason": "TruffleHog timed out; continuing with LLM classification.",
-            }
-
-        except Exception as e:
-            print(f"[SecurityAgent] TruffleHog error: {e}")
-
-            fallback = self._detect_obvious_secret_patterns(cleaned)
-
-            if fallback:
-                return {
-                    "available": True,
-                    "found": True,
-                    "categories": fallback,
-                    "reason": "A credential-like value was detected by deterministic fallback.",
-                }
-
-            return {
-                "available": False,
-                "found": False,
-                "categories": [],
-                "reason": "TruffleHog could not complete; continuing with LLM classification.",
-            }
-
-        finally:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-
     def context_classifier(self, prompt: str, response: str) -> Dict[str, Any]:
         """Layer 2: LLM Context Classifier."""
-
-        if not isinstance(prompt, str):
-            prompt = ""
-        if not isinstance(response, str):
-            response = ""
-
-        combined_text = "\n".join(part.strip() for part in (prompt, response) if part and part.strip())
-        if combined_text:
-            secret_result = self._scan_with_trufflehog(combined_text)
-        else:
-            secret_result = {"found": False, "categories": [], "reason": "TruffleHog unavailable; continuing with LLM classification."}
-
-        if secret_result.get("found"):
-            categories = secret_result.get("categories") or ["Credential"]
-            return {
-                "type": "ContextClassifier",
-                "sensitivity": "Highly Restricted",
-                "confidence": 1.0,
-                "categories": categories,
-                "reason": secret_result.get("reason") or "A secret or credential was detected in the supplied context.",
-            }
-
         sys_prompt = """You are an enterprise data sensitivity classification engine.
 
     Your task is to classify the INFORMATION contained in the user's prompt and the LLM response.
 
     IMPORTANT:
-    Classify the actual information/data being transmitted, NOT merely the topic being discussed.
+    Classify the sensitivity of the actual information/data being transmitted, NOT the topic being discussed, the user's intent, or the fact that the request is related to security or an organization.
 
     Use exactly one sensitivity level:
     - Public
@@ -491,14 +139,14 @@ class SecurityAgent:
     CLASSIFICATION RULES:
 
     1. PUBLIC
-    Information intentionally public or generally available to anyone.
+    Information that is intentionally public or generally available to anyone.
     Examples:
     - General knowledge
-    - Educational information
+    - Public educational information
     - Public documentation
     - Publicly available facts
-    - General questions about passwords, APIs, security, encryption, etc.
-    when NO actual sensitive data is provided.
+    - General questions such as "What is machine learning?"
+    - Questions about passwords, APIs, security, etc. when NO actual secret or sensitive data is provided
 
     2. INTERNAL
     Non-public organizational information that is not confidential or highly restricted.
@@ -507,182 +155,101 @@ class SecurityAgent:
     - Internal procedures
     - Internal project information
     - Non-public operational information
-    - Internal discussions without confidential/restricted data
+    - Internal discussions that do not contain confidential or highly restricted data
 
     3. CONFIDENTIAL
     Sensitive non-public organizational information whose disclosure could harm the organization.
     Examples:
-    - Financial reports
-    - Non-public financial information
-    - Unreleased product plans
+    - Financial reports or non-public financial information
+    - Unreleased product plans or roadmaps
     - Proprietary algorithms
     - Confidential source code
     - Non-public business strategy
     - Confidential technical documentation
 
     4. HIGHLY RESTRICTED
-    Actual sensitive data requiring the highest protection.
+    Information that must receive the highest level of protection.
     Examples:
     - Passwords
     - API keys
     - Authentication tokens
+    - Access tokens
     - Bearer tokens
     - Private keys
+    - Secrets or credentials
     - SSNs / government identification numbers
     - Credit/debit card numbers
-    - Protected health information
-    - Other actual credentials or authentication-sensitive identifiers
+    - Protected health information (PHI)
+    - Other regulated or authentication-sensitive identifiers
 
     CRITICAL DISTINCTIONS:
 
-    - A question ABOUT a sensitive topic is NOT itself sensitive.
+    - A QUESTION ABOUT sensitive information is NOT itself sensitive.
     Example: "What is an API key?" -> Public.
 
-    - General security advice is NOT automatically Internal or Confidential.
-    Example: "How should API keys be stored?" -> Public.
+    - A REQUEST TO DISCUSS password policies is NOT itself a password.
+    Example: "How should a company improve its password policy?" -> Public/Internal depending on context.
 
-    - Actual sensitive data MUST be classified according to that data.
+    - ACTUAL sensitive data appearing in the prompt or response MUST be classified according to that data.
     Example: "My password is P@ssw0rd123" -> Highly Restricted.
+
+    - The presence of words such as "password", "API key", "SSN", "security", or "confidential" does NOT automatically determine the classification. Determine whether actual sensitive information is present.
 
     - Do not infer sensitive information that is not explicitly present.
 
+    - Do not downgrade information merely because it appears inside an otherwise harmless question.
+
     - If multiple sensitivity levels are present, choose the HIGHEST applicable level.
 
-    - Evaluate BOTH the user prompt AND the LLM response.
+    - Evaluate both the USER PROMPT and LLM RESPONSE.
 
-    - If either contains sensitive information, use the highest applicable level.
+    - If either contains sensitive information, classify according to the highest applicable sensitivity level across both fields.
 
-    EMAIL AND PHONE NUMBER RULE:
+    - Do not let harmless content in one field downgrade sensitive content in the other.
 
-    Ordinary personal contact information is NOT Highly Restricted by itself.
+    - If actual secrets or regulated identifiers are detected, always classify as Highly Restricted.
 
-    - A normal email address such as:
-    "test@example.com"
-    -> Internal
+    - Email addresses and phone numbers are personal information and must NOT automatically be classified as Public merely because they are not secrets.
 
-    - A normal phone number such as:
-    "+919876543210"
-    -> Internal
-
-    Do NOT classify an email address or phone number as Highly Restricted
-    merely because it is personal information.
-
-    Only classify contact information as Highly Restricted if it is part of
-    another explicitly Highly Restricted dataset or credential context.
-
-    Examples:
-
-    "Email me at test@example.com"
-    -> Internal
-
-    "Call me at +919876543210"
-    -> Internal
-
-    "My password is P@ssw0rd123"
-    -> Highly Restricted
-
-    "My SSN is 123-45-6789"
-    -> Highly Restricted
-
-    - When uncertain between two levels, choose the more restrictive level,
-    EXCEPT for ordinary email addresses and phone numbers. Those remain
-    Internal unless another rule explicitly makes the surrounding data
-    Highly Restricted.
+    - When uncertain between two levels, choose the more restrictive level.
 
     CONFIDENCE:
-    Return a number between 0.0 and 1.0.
+    Return a confidence between 0.0 and 1.0 representing how certain you are about the classification.
 
     CATEGORIES:
-    Return concise categories describing sensitive information actually detected.
+    Return concise categories describing the sensitive information actually detected.
+    Examples:
+    ["Password"]
+    ["API Key"]
+    ["Financial Information"]
+    ["Source Code"]
+    ["General Knowledge"]
     If no sensitive category is present, return [].
 
     REASON:
-    Give a brief explanation based only on information present.
+    Give a brief explanation based only on the information present in the prompt and response.
 
-    Return ONLY valid JSON:
-
+    Return ONLY valid JSON in exactly this structure:
     {
         "sensitivity": "Public|Internal|Confidential|Highly Restricted",
         "confidence": 0.0,
         "categories": [],
         "reason": "brief explanation"
-    }
-    """
-
-        user_prompt = (
-            f"Prompt: {prompt}\n"
-            f"Response: {response}\n"
-            "Classify the sensitivity of the complete context."
-        )
-
-        try:
-            llm_out = self._call_llm_json(sys_prompt, user_prompt)
-
-            # Empty / failed LLM output
-            if not isinstance(llm_out, dict) or not llm_out:
-                return {
-                    "type": "ContextClassifier",
-                    "sensitivity": "Internal",
-                    "confidence": 0.5,
-                    "categories": [],
-                    "reason": "LLM classification unavailable; using safe fallback.",
-                }
-
-            # Validate sensitivity
-            valid_sensitivities = {
-                "Public",
-                "Internal",
-                "Confidential",
-                "Highly Restricted",
-            }
-
-            sensitivity = llm_out.get("sensitivity", "Internal")
-
-            if sensitivity not in valid_sensitivities:
-                sensitivity = "Internal"
-
-            # Validate confidence
-            confidence = llm_out.get("confidence", 0.5)
-
-            if (
-                not isinstance(confidence, (int, float))
-                or isinstance(confidence, bool)
-                or not 0.0 <= confidence <= 1.0
-            ):
-                confidence = 0.5
-
-            # Validate categories
-            categories = llm_out.get("categories", [])
-
-            if not isinstance(categories, list):
-                categories = []
-
-            # Validate reason
-            reason = llm_out.get("reason", "Classified by context classifier")
-
-            if not isinstance(reason, str) or not reason.strip():
-                reason = "Classified by context classifier"
-
-            reason = self._redact_sensitive_values(reason)
-
-            return {
-                "type": "ContextClassifier",
-                "sensitivity": sensitivity,
-                "confidence": confidence,
-                "categories": categories,
-                "reason": reason,
-            }
-
-        except Exception as e:
-            print(f"[SecurityAgent Context Classifier Error] {e}")
-
-            return {
-                "type": "ContextClassifier",
-                "sensitivity": "Internal",
-                "confidence": 0.5,
-                "categories": [],
-                "reason": "LLM classification failed; using safe fallback.",
-            }
+    }"""
+        user_prompt = f"Prompt: {prompt}\nResponse: {response}\nClassify the sensitivity of the response context."
+        
+        llm_out = self._call_llm_json(sys_prompt, user_prompt)
+        
+        if not llm_out:
+            return {"sensitivity": "Internal", "confidence": 0.5}
+            
+        return {
+            "type": "ContextClassifier",
+            "sensitivity": llm_out.get("sensitivity", "Internal"),
+            "confidence": llm_out.get("confidence", 0.5),
+            "categories": llm_out.get("categories", []),
+            "reason": llm_out.get("reason", "Classified by context classifier"),
+        }
 
     def _deterministic_sensitivity(self, text: str, pattern_matches: list[str]) -> str | None:
         restricted = {"API Key / Secret Token", "Password", "Credit Card Number", "SSN / Tax ID"}
