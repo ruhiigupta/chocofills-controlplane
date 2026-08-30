@@ -37,8 +37,10 @@ class CorrectedPromptInjection(PromptInjection):
             return prompt, False, 1.0
 
         try:
-            _, is_valid = super().scan(prompt)
-            return prompt, is_valid, 0.0 if is_valid else 1.0
+            _, is_valid, risk_score = super().scan(prompt)
+
+            return prompt, is_valid, risk_score
+
         except Exception as e:
             print(f"[Prompt Injection Scanner] Error: {e}")
             return prompt, True, 0.0
@@ -172,7 +174,7 @@ def decision_layer_node(state: ControlPlaneState) -> dict[str, Any]:
     performance_score = float(state.get("performance_score", 0.0))
     cost_score = float(state.get("cost_score", 0.0))
     unified_risk = round(
-        0.4 * security_score + 0.4 * (100.0 - performance_score) + 0.2 * (100.0 - cost_score),
+        0.55 * security_score + 0.3 * (100.0 - performance_score) + 0.15 * (100.0 - cost_score),
         2,
     )
 
