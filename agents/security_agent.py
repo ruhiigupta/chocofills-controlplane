@@ -137,6 +137,9 @@ class SecurityAgent:
         ]
 
         for entity_type in priority_patterns:
+            if entity_type not in self.pii_patterns:
+                continue
+
             pattern = self.pii_patterns[entity_type]
 
             for match in re.finditer(pattern, text):
