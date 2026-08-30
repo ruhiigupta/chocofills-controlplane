@@ -3,6 +3,14 @@ from schemas.core import EvaluationTrace
 
 
 class ControlPlaneState(TypedDict):
+    # Request tracing & evaluation metadata
+    request_id: str
+    audit_record_id: str
+    expected_action: Optional[str]
+    ground_truth: Optional[str]
+    evaluation_result: Optional[str]
+    latency_ms: float
+
     # Input & LLM Metadata
     user_id: str
     use_case: str
@@ -34,6 +42,8 @@ class ControlPlaneState(TypedDict):
     evaluation_trace: Optional[EvaluationTrace]
 
     # Security Agent Outputs
+    sensitivity: Optional[str]
+    categories: List[str]
     security_score: float
     security_status: str
     security_decision: str
