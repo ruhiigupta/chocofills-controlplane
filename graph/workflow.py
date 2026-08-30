@@ -1,8 +1,9 @@
 import json
 import os
 import re
+import time
+import uuid
 from typing import Any, Callable
-from unittest import result
 
 from langgraph.graph import END, START, StateGraph
 from llm_guard.input_scanners import PromptInjection
@@ -11,10 +12,90 @@ from agents.cost_agent import cost_checker_node
 from agents.performance_agent import PerformanceAgent
 from agents.security_agent import SecurityAgent
 from graph.state import ControlPlaneState
+from services.audit_logger import AuditLogger
 
 
 security_agent_instance = SecurityAgent()
 performance_agent_instance = PerformanceAgent()
+audit_logger = AuditLogger()
+
+
+def _normalize_action(action: Any) -> str:
+    return str(action or "").upper()
+
+
+def _compute_evaluation_result(expected_action: Any, ground_truth: Any, observed_action: Any) -> str | None:
+    expected = _normalize_action(expected_action)
+    truth = _normalize_action(ground_truth)
+    observed = _normalize_action(observed_action)
+
+    if truth in {"ALLOW", "BLOCK"} and observed in {"ALLOW", "BLOCK"}:
+        if truth == "BLOCK" and observed == "BLOCK":
+            return "TP"
+        if truth == "ALLOW" and observed == "ALLOW":
+            return "TN"
+        if truth == "ALLOW" and observed == "BLOCK":
+            return "FP"
+        if truth == "BLOCK" and observed == "ALLOW":
+            return "FN"
+
+    if expected and observed == expected:
+        return "MATCH"
+    if expected and truth and observed != truth:
+        return "MISMATCH"
+    if truth in {"ESCALATE", "REWRITE"} and observed == truth:
+        return "MATCH"
+    if truth in {"ESCALATE", "REWRITE"} and observed != truth:
+        return "MISMATCH"
+    return None
+
+
+def _persist_audit_record(state: ControlPlaneState, *, forced: bool = False) -> dict[str, Any]:
+    request_id = state.get("request_id") or str(uuid.uuid4())
+    if state.get("audit_record_id") and not forced:
+        return {"request_id": request_id, "audit_record_id": state.get("audit_record_id")}
+
+    record = {
+        "request_id": request_id,
+        "audit_record_id": state.get("audit_record_id") or f"audit_{request_id}",
+        "user_id": state.get("user_id"),
+        "use_case": state.get("use_case", "internal_copilot"),
+        "user_prompt": state.get("user_prompt", ""),
+        "llm_response": state.get("llm_response", ""),
+        "source": state.get("source", "internal_api"),
+        "destination": state.get("destination", "external_vendor"),
+        "trust_boundary_crossed": bool(state.get("trust_boundary_crossed", False)),
+        "sensitivity": state.get("sensitivity") or "UNKNOWN",
+        "categories": state.get("categories", []) or [],
+        "security_score": float(state.get("security_score", 0.0)),
+        "security_status": state.get("security_status", "PENDING"),
+        "security_decision": state.get("security_decision", "UNKNOWN"),
+        "security_findings": state.get("security_findings", []),
+        "matched_policies": state.get("matched_policies", []),
+        "policy_source": state.get("policy_source", "UNKNOWN"),
+        "performance_score": float(state.get("performance_score", 0.0)),
+        "performance_status": state.get("performance_status", "PENDING"),
+        "cost_score": float(state.get("cost_score", 0.0)),
+        "cost_status": state.get("cost_status", "PENDING"),
+        "estimated_cost": float(state.get("estimated_cost", 0.0)),
+        "unified_risk_score": float(state.get("unified_risk_score", 0.0)),
+        "final_action": state.get("final_action", "PENDING"),
+        "preflight_risk_score": float(state.get("preflight_risk_score", 0.0)),
+        "expected_action": state.get("expected_action"),
+        "ground_truth": state.get("ground_truth"),
+        "evaluation_result": state.get("evaluation_result") or _compute_evaluation_result(
+            state.get("expected_action"),
+            state.get("ground_truth"),
+            state.get("final_action"),
+        ),
+        "latency_ms": float(state.get("latency_ms", 0.0)),
+    }
+
+    persisted = audit_logger.log_request(record)
+    return {
+        "request_id": persisted.get("request_id", request_id),
+        "audit_record_id": persisted.get("audit_record_id") or record["audit_record_id"],
+    }
 
 
 class CorrectedPromptInjection(PromptInjection):
@@ -56,6 +137,7 @@ def default_preflight_scan(prompt: str) -> tuple[str, bool, float]:
 
 
 def preflight_node(state: ControlPlaneState) -> dict[str, Any]:
+    request_id = state.get("request_id") or str(uuid.uuid4())
     scanner = state.get("preflight_scanner", default_preflight_scan)
     scan_result = scanner(state.get("user_prompt", ""))
     if len(scan_result) == 2:
@@ -81,7 +163,45 @@ def preflight_node(state: ControlPlaneState) -> dict[str, Any]:
         risk_score = 100.0
         reason = "Confidential data cannot be sent to an external LLM."
 
+    audit_payload = {
+        "request_id": request_id,
+        "user_id": state.get("user_id"),
+        "use_case": state.get("use_case", "internal_copilot"),
+        "user_prompt": sanitized_prompt,
+        "llm_response": state.get("llm_response", ""),
+        "source": state.get("source", "internal_api"),
+        "destination": state.get("destination", "external_vendor"),
+        "trust_boundary_crossed": bool(state.get("destination", "external_vendor") in {"external_vendor", "public_api"}),
+        "sensitivity": sensitivity or "UNKNOWN",
+        "categories": sorted(set(patterns.get("matches", []))),
+        "security_score": 100.0 if blocked else 0.0,
+        "security_status": "FAIL" if blocked else "PASS",
+        "security_decision": "BLOCK" if blocked else "ALLOW",
+        "security_findings": [
+            {"type": "Preflight", "reason": reason, "confidence": 1.0, "context": {"pattern_matches": patterns.get("matches", []), "sensitivity": sensitivity or "UNKNOWN"}}
+        ] if blocked else [],
+        "matched_policies": [{"policy_id": "PREFLIGHT", "decision": "BLOCK", "reason": reason}] if blocked else [],
+        "policy_source": "PREFLIGHT",
+        "performance_score": float(state.get("performance_score", 0.0)),
+        "performance_status": state.get("performance_status", "PENDING"),
+        "cost_score": float(state.get("cost_score", 0.0)),
+        "cost_status": state.get("cost_status", "PENDING"),
+        "estimated_cost": float(state.get("estimated_cost", 0.0)),
+        "unified_risk_score": 100.0 if blocked else float(state.get("unified_risk_score", 0.0)),
+        "final_action": "BLOCK" if blocked else state.get("final_action", "PENDING"),
+        "preflight_risk_score": risk_score,
+        "expected_action": state.get("expected_action"),
+        "ground_truth": state.get("ground_truth"),
+        "evaluation_result": _compute_evaluation_result(state.get("expected_action"), state.get("ground_truth"), "BLOCK" if blocked else state.get("final_action")),
+        "latency_ms": float(state.get("latency_ms", 0.0)),
+    }
+    if blocked:
+        persisted = audit_logger.log_request(audit_payload)
+        audit_payload["audit_record_id"] = persisted.get("audit_record_id") or f"audit_{request_id}"
+
     return {
+        "request_id": request_id,
+        "audit_record_id": audit_payload.get("audit_record_id"),
         "user_prompt": sanitized_prompt,
         "preflight_risk_score": risk_score,
         "preflight_blocked": blocked,
@@ -146,7 +266,11 @@ def security_agent_node(state: ControlPlaneState) -> dict[str, Any]:
         source=state.get("source", "internal_api"),
         dest=state.get("destination", "external_vendor"),
     )
+    findings = result.get("security_findings", [])
+    context = findings[0].get("context", {}) if findings else {}
     return {
+        "sensitivity": context.get("sensitivity", "UNKNOWN"),
+        "categories": sorted(set(context.get("categories", []) or [])),
         "security_score": result["security_score"],
         "security_status": result["security_status"],
         "security_decision": result["security_decision"],
@@ -203,7 +327,44 @@ def decision_layer_node(state: ControlPlaneState) -> dict[str, Any]:
     with open(audit_file, "a", encoding="utf-8") as file:
         file.write(json.dumps(audit_log) + "\n")
 
-    return {"unified_risk_score": unified_risk, "final_action": final_action, "audit_log": audit_log}
+    persisted = _persist_audit_record({
+        **state,
+        "request_id": state.get("request_id") or str(uuid.uuid4()),
+        "audit_record_id": state.get("audit_record_id"),
+        "sensitivity": state.get("sensitivity") or "UNKNOWN",
+        "categories": state.get("categories", []) or [],
+        "security_score": security_score,
+        "security_status": state.get("security_status", "PENDING"),
+        "security_decision": security_decision,
+        "security_findings": state.get("security_findings", []),
+        "matched_policies": state.get("matched_policies", []),
+        "policy_source": state.get("policy_source", "UNKNOWN"),
+        "performance_score": performance_score,
+        "performance_status": state.get("performance_status", "PENDING"),
+        "cost_score": cost_score,
+        "cost_status": state.get("cost_status", "PENDING"),
+        "estimated_cost": float(state.get("estimated_cost", 0.0)),
+        "unified_risk_score": unified_risk,
+        "final_action": final_action,
+        "preflight_risk_score": float(state.get("preflight_risk_score", 0.0)),
+        "expected_action": state.get("expected_action"),
+        "ground_truth": state.get("ground_truth"),
+        "evaluation_result": state.get("evaluation_result") or _compute_evaluation_result(
+            state.get("expected_action"), state.get("ground_truth"), final_action
+        ),
+        "latency_ms": float(state.get("latency_ms", 0.0)),
+    })
+
+    return {
+        "request_id": persisted.get("request_id"),
+        "audit_record_id": persisted.get("audit_record_id"),
+        "unified_risk_score": unified_risk,
+        "final_action": final_action,
+        "audit_log": audit_log,
+        "evaluation_result": state.get("evaluation_result") or _compute_evaluation_result(
+            state.get("expected_action"), state.get("ground_truth"), final_action
+        ),
+    }
 
 
 def final_response_node(state: ControlPlaneState) -> dict[str, Any]:

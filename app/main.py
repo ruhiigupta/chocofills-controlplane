@@ -14,8 +14,10 @@ load_dotenv()
 # Import our LangGraph State & Workflow
 from graph.workflow import CorrectedPromptInjection, controlplane_graph, security_agent_instance
 from graph.state import ControlPlaneState
+from services.audit_logger import AuditLogger
 
 app = FastAPI(title="ControlPlane.ai Gateway")
+audit_logger = AuditLogger()
 
 # 1. Initialize Security Scanner
 injection_scanner = CorrectedPromptInjection(threshold=0.5)
@@ -120,6 +122,10 @@ async def chat_endpoint(
 ):
     final_input_text = ""
     destination = "external_vendor"
+    request_id = os.getenv("CONTROLPLANE_REQUEST_ID") or None
+    if request_id is None:
+        import uuid
+        request_id = str(uuid.uuid4())
 
     if file:
         file_bytes = await file.read()
@@ -134,6 +140,12 @@ async def chat_endpoint(
 
     # LangGraph owns the complete request lifecycle, including preflight and target execution.
     initial_state: ControlPlaneState = {
+        "request_id": request_id,
+        "audit_record_id": "",
+        "expected_action": None,
+        "ground_truth": None,
+        "evaluation_result": None,
+        "latency_ms": 0.0,
         "user_id": user_id,
         "use_case": use_case,
         "source": "internal_api",
@@ -158,6 +170,8 @@ async def chat_endpoint(
         "performance_status": "PENDING",
         "factual_findings": [],
         "relevance_findings": [],
+        "sensitivity": "UNKNOWN",
+        "categories": [],
         "security_score": 0.0,
         "security_status": "PENDING",
         "security_decision": "PENDING",
@@ -181,6 +195,8 @@ async def chat_endpoint(
     final_state = controlplane_graph.invoke(initial_state)
 
     return {
+        "request_id": final_state.get("request_id") or request_id,
+        "audit_record_id": final_state.get("audit_record_id"),
         "status": "BLOCKED" if final_state["preflight_blocked"] else final_state["final_action"],
         "processed_input": final_input_text.strip(),
         "llm_response": final_state.get("llm_response", ""),
@@ -208,6 +224,16 @@ async def chat_endpoint(
             "final_action": final_state["final_action"],
         }
     }
+
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    return audit_logger.get_metrics()
+
+
+@app.get("/audit")
+async def audit_endpoint(limit: int = 20):
+    return {"records": audit_logger.get_recent_records(limit=max(1, min(limit, 100))) }
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
