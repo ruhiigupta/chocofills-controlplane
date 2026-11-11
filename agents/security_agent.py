@@ -16,7 +16,7 @@ load_dotenv()
 
 class SecurityAgent:
     def __init__(self):
-        # OpenRouter Configuration
+        # OpenRouter Configuratio
         self.api_key = os.getenv("OPENROUTER_API_KEY")
         self.trufflehog_path = os.getenv("TRUFFLEHOG_PATH", r"C:\trufflehog\trufflehog.exe")
         if self.api_key:
